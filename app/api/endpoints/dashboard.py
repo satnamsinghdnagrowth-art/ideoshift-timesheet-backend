@@ -9,7 +9,7 @@ from app.db.session import get_db
 from app.models.user import User, UserRole
 from app.models.task_entry import TaskEntry, TaskEntryStatus, TaskSubEntry
 from app.models.leave_request import LeaveRequest, LeaveStatus
-from app.models.client import Client
+from app.models.client import Client, ClientStatus
 from app.models.task_master import TaskMaster
 from app.api.dependencies import get_current_user, require_admin
 from app.core.date_filters import get_date_range
@@ -38,6 +38,11 @@ class AdminDashboardStats(BaseModel):
     entries_today: int
     entries_this_week: int
     entries_this_month: int
+    # Client counts by status
+    active_clients_count: int
+    inactive_clients_count: int
+    backlog_clients_count: int
+    demo_clients_count: int
     # Chart data
     status_chart: List[ChartDataPoint]
     daily_hours_chart: List[HoursChartDataPoint]
@@ -135,6 +140,23 @@ def get_admin_stats(
         User.role == 'EMPLOYEE'
     ).scalar() or 0
     
+    # Client counts by status
+    active_clients_count = db.query(func.count(Client.id)).filter(
+        Client.status == ClientStatus.ACTIVE
+    ).scalar() or 0
+    
+    inactive_clients_count = db.query(func.count(Client.id)).filter(
+        Client.status == ClientStatus.INACTIVE
+    ).scalar() or 0
+    
+    backlog_clients_count = db.query(func.count(Client.id)).filter(
+        Client.status == ClientStatus.BACKLOG
+    ).scalar() or 0
+    
+    demo_clients_count = db.query(func.count(Client.id)).filter(
+        Client.status == ClientStatus.DEMO
+    ).scalar() or 0
+    
     # Today's stats
     today = date.today()
     entries_today = db.query(func.count(TaskEntry.id)).filter(
@@ -189,12 +211,12 @@ def get_admin_stats(
             hours=float(hours)
         ))
     
-    # Chart data - Client breakdown
+    # Chart data - Client breakdown (using LEFT JOIN to include entries without clients)
     client_query = db.query(
-        Client.name,
+        func.coalesce(Client.name, 'No Client').label('client_name'),
         func.count(TaskEntry.id)
-    ).join(
-        TaskEntry, Client.id == TaskEntry.client_id
+    ).outerjoin(
+        Client, TaskEntry.client_id == Client.id  # LEFT JOIN
     ).join(
         User, TaskEntry.user_id == User.id
     ).filter(
@@ -204,7 +226,7 @@ def get_admin_stats(
     )
     
     if client_id:
-        client_query = client_query.filter(Client.id == client_id)
+        client_query = client_query.filter(TaskEntry.client_id == client_id)
     if user_id:
         client_query = client_query.filter(TaskEntry.user_id == user_id)
     
@@ -258,6 +280,10 @@ def get_admin_stats(
         entries_today=entries_today,
         entries_this_week=entries_this_week,
         entries_this_month=entries_this_month,
+        active_clients_count=active_clients_count,
+        inactive_clients_count=inactive_clients_count,
+        backlog_clients_count=backlog_clients_count,
+        demo_clients_count=demo_clients_count,
         status_chart=status_chart,
         daily_hours_chart=daily_hours,
         client_breakdown=client_breakdown,

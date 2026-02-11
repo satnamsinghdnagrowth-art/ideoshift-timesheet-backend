@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     SMTP_PORT: Optional[int] = 587
     SMTP_USERNAME: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
-    SMTP_FROM_EMAIL: Optional[str] = "noreply@timesheet.com"
-    SMTP_FROM_NAME: Optional[str] = "Medical Team Tool"
+    SMTP_FROM_EMAIL: Optional[str] = "noreply@ideoshift.com"
+    SMTP_FROM_NAME: Optional[str] = "Ideoshift"
     FRONTEND_URL: Optional[str] = "http://localhost:3000"
     
     class Config:

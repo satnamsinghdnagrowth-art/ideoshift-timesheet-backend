@@ -167,9 +167,13 @@ def create_test_data():
                     hours = random.randint(1, 4)
                     production = random.randint(20, 150) if task.is_profitable else 0
                     
+                    # Each subtask can have different client
+                    subtask_client = random.choice(clients)
+                    
                     sub_entry = TaskSubEntry(
                         id=uuid4(),
                         task_entry_id=entry.id,
+                        client_id=subtask_client.id,  # Added client_id
                         task_master_id=task.id,
                         title=task.name,
                         description=f"{task.name} work",

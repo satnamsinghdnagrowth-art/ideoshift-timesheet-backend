@@ -1,11 +1,12 @@
-from pydantic import BaseModel, EmailStr, Field, validator
-from typing import Optional, List
+from pydantic import BaseModel, EmailStr, Field, validator, field_validator
+from typing import Optional, List, Union
 from datetime import date, datetime
 from uuid import UUID
 from decimal import Decimal
 from app.models.user import UserRole
 from app.models.task_entry import TaskEntryStatus
 from app.models.leave_request import LeaveStatus, LeaveType
+from app.models.client import ClientStatus
 
 
 # ============= User Schemas =============
@@ -56,9 +57,18 @@ class TokenData(BaseModel):
 class ClientBase(BaseModel):
     name: str
     contact_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[Union[EmailStr, str]] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    status: ClientStatus = ClientStatus.ACTIVE
+    
+    @field_validator('email', mode='before')
+    @classmethod
+    def validate_email(cls, v):
+        # Allow None or empty string
+        if v is None or v == '' or (isinstance(v, str) and v.strip() == ''):
+            return None
+        return v
 
 
 class ClientCreate(ClientBase):
@@ -68,10 +78,19 @@ class ClientCreate(ClientBase):
 class ClientUpdate(BaseModel):
     name: Optional[str] = None
     contact_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[Union[EmailStr, str]] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    status: Optional[ClientStatus] = None
     is_active: Optional[bool] = None
+    
+    @field_validator('email', mode='before')
+    @classmethod
+    def validate_email(cls, v):
+        # Allow None or empty string
+        if v is None or v == '' or (isinstance(v, str) and v.strip() == ''):
+            return None
+        return v
 
 
 class ClientResponse(ClientBase):
@@ -116,7 +135,7 @@ class TaskMasterResponse(TaskMasterBase):
 
 # ============= Task Sub Entry Schemas =============
 class TaskSubEntryBase(BaseModel):
-    client_id: UUID  # NEW: Required client for each sub-task
+    client_id: Optional[UUID] = None  # Optional: Not required for leave tasks
     title: str
     description: Optional[str] = None
     hours: Decimal = Field(..., ge=0, le=24)
@@ -157,13 +176,7 @@ class TaskEntryCreate(TaskEntryBase):
             raise ValueError('Total hours must be greater than 0')
         return v
     
-    @validator('sub_entries')
-    def validate_client_ids(cls, v):
-        """Ensure all sub-entries have valid client_id"""
-        for sub in v:
-            if not sub.client_id:
-                raise ValueError('Each task must have a client assigned')
-        return v
+    # Removed client_id validation to allow leave tasks without clients
 
 
 class TaskEntryUpdate(BaseModel):

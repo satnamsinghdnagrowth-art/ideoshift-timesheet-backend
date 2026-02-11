@@ -46,15 +46,14 @@ def get_timesheet_report(
         TaskEntry.work_date,
         User.name,
         User.email,
-        # Import Client in the function to avoid circular imports
-        __import__('app.models.client', fromlist=['Client']).Client.name.label('client_name'),
+        func.coalesce(Client.name, 'No Client').label('client_name'),
         TaskEntry.task_name,
         TaskEntry.total_hours,
         TaskEntry.status,
         TaskEntry.admin_comment
-    ).join(User, TaskEntry.user_id == User.id).join(
-        __import__('app.models.client', fromlist=['Client']).Client,
-        TaskEntry.client_id == __import__('app.models.client', fromlist=['Client']).Client.id
+    ).join(User, TaskEntry.user_id == User.id).outerjoin(
+        Client,
+        TaskEntry.client_id == Client.id  # LEFT JOIN to include entries without client
     )
     
     # Apply filters
@@ -274,16 +273,16 @@ async def export_to_excel(
             # Default to current month if no parameters provided
             from_date, to_date = get_date_range("this_month")
     
-    # Query task entries with sub-entries grouped by client
+    # Query task entries with sub-entries grouped by client (using TaskSubEntry.client_id)
     query = db.query(
-        Client.name.label('client_name'),
+        func.coalesce(Client.name, 'No Client').label('client_name'),
         TaskMaster.name.label('task_name'),
         func.sum(TaskSubEntry.production).label('total_production'),
         func.sum(TaskSubEntry.hours).label('total_hours')
     ).join(
         TaskEntry, TaskSubEntry.task_entry_id == TaskEntry.id
-    ).join(
-        Client, TaskEntry.client_id == Client.id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id  # Use TaskSubEntry.client_id with LEFT JOIN
     ).join(
         TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
     ).join(
@@ -299,7 +298,7 @@ async def export_to_excel(
     if client_ids:
         client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
-            query = query.filter(TaskEntry.client_id.in_(client_id_list))
+            query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
     
     if user_ids:
         user_id_list = [UUID(uid.strip()) for uid in user_ids.split(',') if uid.strip()]
@@ -523,14 +522,14 @@ def get_my_timesheet_report(
         TaskEntry.work_date,
         User.name,
         User.email,
-        Client.name.label('client_name'),
+        func.coalesce(Client.name, 'No Client').label('client_name'),
         TaskEntry.task_name,
         TaskEntry.total_hours,
         TaskEntry.status,
         TaskEntry.admin_comment
-    ).join(User, TaskEntry.user_id == User.id).join(
+    ).join(User, TaskEntry.user_id == User.id).outerjoin(
         Client,
-        TaskEntry.client_id == Client.id
+        TaskEntry.client_id == Client.id  # LEFT JOIN to include leave entries
     ).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
@@ -600,16 +599,16 @@ async def export_my_report_to_excel(
         # Default to current month if no dates specified
         from_date, to_date = get_date_range("this_month")
     
-    # Query for user's data
+    # Query for user's data (using TaskSubEntry.client_id)
     query = db.query(
-        Client.name.label('client_name'),
+        func.coalesce(Client.name, 'No Client').label('client_name'),
         TaskMaster.name.label('task_name'),
         func.sum(TaskSubEntry.production).label('total_production'),
         func.sum(TaskSubEntry.hours).label('total_hours')
     ).join(
         TaskEntry, TaskSubEntry.task_entry_id == TaskEntry.id
-    ).join(
-        Client, TaskEntry.client_id == Client.id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id  # Use TaskSubEntry.client_id with LEFT JOIN
     ).join(
         TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
     ).filter(
@@ -623,7 +622,7 @@ async def export_my_report_to_excel(
     if client_ids:
         client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
-            query = query.filter(TaskEntry.client_id.in_(client_id_list))
+            query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
     
     if task_master_ids:
         task_master_id_list = [UUID(tmid.strip()) for tmid in task_master_ids.split(',') if tmid.strip()]

@@ -131,14 +131,15 @@ def create_task_entry(
 ):
     """Create a new task entry with per-sub-task client tracking."""
     
-    # Validate all clients in sub-entries exist
-    client_ids = {sub.client_id for sub in task_entry_create.sub_entries}
-    clients = db.query(Client).filter(Client.id.in_(client_ids)).all()
-    if len(clients) != len(client_ids):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="One or more clients not found"
-        )
+    # Validate all clients in sub-entries exist (skip None values for leave tasks)
+    client_ids = {sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None}
+    if client_ids:
+        clients = db.query(Client).filter(Client.id.in_(client_ids)).all()
+        if len(clients) != len(client_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or more clients not found"
+            )
     
     # Check if task entry already exists for this date
     existing = db.query(TaskEntry).filter(
@@ -174,10 +175,11 @@ def create_task_entry(
         db
     )
     
-    # Create task entry (client_id is optional now, defaults to first sub-entry's client for backwards compatibility)
+    # Create task entry (client_id is optional now, defaults to first non-None sub-entry client)
+    first_client_id = next((sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None), None)
     task_entry = TaskEntry(
         user_id=current_user.id,
-        client_id=task_entry_create.client_id or task_entry_create.sub_entries[0].client_id,  # Use first sub-entry client if not specified
+        client_id=task_entry_create.client_id or first_client_id,  # Use first non-None sub-entry client if not specified
         work_date=task_entry_create.work_date,
         task_name=task_entry_create.task_name,
         description=task_entry_create.description,
@@ -260,7 +262,7 @@ def update_task_entry(
             detail="Task entry not found"
         )
     
-    # Check if editable
+    # Check if editable (allow DRAFT, PENDING, and REJECTED before final approval)
     if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.PENDING, TaskEntryStatus.REJECTED]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -296,7 +298,8 @@ def update_task_entry(
                 hours=sub_data.hours,
                 productive=task_master.is_profitable,  # Auto-set from task master
                 production=sub_data.production,
-                task_master_id=sub_data.task_master_id
+                task_master_id=sub_data.task_master_id,
+                client_id=sub_data.client_id  # Add client_id support
             )
             db.add(sub_entry)
             total_hours += sub_data.hours
@@ -377,10 +380,11 @@ def delete_task_entry(
             detail="Task entry not found"
         )
     
-    if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.REJECTED]:
+    # Allow deletion of DRAFT, PENDING (before admin approval), and REJECTED entries
+    if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.PENDING, TaskEntryStatus.REJECTED]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete submitted or approved task entries"
+            detail="Cannot delete approved task entries"
         )
     
     db.delete(task_entry)

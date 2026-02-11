@@ -1,9 +1,17 @@
-from sqlalchemy import Column, String, Boolean, DateTime
+from sqlalchemy import Column, String, Boolean, DateTime, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
+import enum
 from app.db.session import Base
+
+
+class ClientStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    BACKLOG = "BACKLOG"
+    DEMO = "DEMO"
 
 
 class Client(Base):
@@ -15,6 +23,7 @@ class Client(Base):
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
     address = Column(String, nullable=True)
+    status = Column(SQLEnum(ClientStatus), default=ClientStatus.ACTIVE, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
