@@ -10,7 +10,7 @@ from uuid import UUID
 security = HTTPBearer()
 
 
-async def get_current_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
@@ -51,14 +51,14 @@ async def get_current_user(
     return user
 
 
-async def get_current_active_user(
+def get_current_active_user(
     current_user: User = Depends(get_current_user)
 ) -> User:
     """Get the current active user."""
     return current_user
 
 
-async def require_admin(
+def require_admin(
     current_user: User = Depends(get_current_user)
 ) -> User:
     """Require admin role."""
