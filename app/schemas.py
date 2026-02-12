@@ -27,6 +27,15 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class PasswordResetRequest(BaseModel):
+    new_password: str = Field(..., min_length=6)
+
+
+class PasswordResetResponse(BaseModel):
+    message: str
+    new_password: str
+
+
 class UserResponse(UserBase):
     id: UUID
     is_active: bool

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
@@ -23,7 +23,10 @@ def list_pending_task_entries(
     _: User = Depends(require_admin)
 ):
     """List task entries for approval (admin only)."""
-    query = db.query(TaskEntry)
+    query = db.query(TaskEntry).options(
+        joinedload(TaskEntry.user),
+        joinedload(TaskEntry.client)
+    )
     
     if status_filter:
         query = query.filter(TaskEntry.status == status_filter)

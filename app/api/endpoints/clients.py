@@ -19,8 +19,19 @@ def list_clients(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all active clients with optional search."""
+    """
+    List clients with optional search.
+    - Admin: See all clients (any status) that are not deleted (is_active=true)
+    - Employee: See only ACTIVE status clients for task entry creation
+    """
+    from app.models.client import ClientStatus
+    
+    # Base query - only non-deleted clients
     query = db.query(Client).filter(Client.is_active == True)
+    
+    # For employees, also filter by ACTIVE status
+    if current_user.role != UserRole.ADMIN:
+        query = query.filter(Client.status == ClientStatus.ACTIVE)
     
     if search:
         query = query.filter(Client.name.ilike(f"%{search}%"))

@@ -131,22 +131,43 @@ def create_task_entry(
 ):
     """Create a new task entry with per-sub-task client tracking."""
     
-    # Validate all clients in sub-entries exist and are active (skip None values for leave tasks)
+    # Validate all clients in sub-entries exist, are active, and have ACTIVE status
     client_ids = {sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None}
     if client_ids:
         # Convert UUIDs to strings for database query (Client.id is String type)
         client_id_strs = {str(cid) for cid in client_ids}
-        clients = db.query(Client).filter(
+        
+        # Query clients that are active AND have ACTIVE status
+        from app.models.client import ClientStatus
+        active_clients = db.query(Client).filter(
             Client.id.in_(client_id_strs),
-            Client.is_active == True
+            Client.is_active == True,
+            Client.status == ClientStatus.ACTIVE
         ).all()
-        found_client_ids = {c.id for c in clients}
-        missing_client_ids = client_id_strs - found_client_ids
-        if missing_client_ids:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Clients not found or inactive: {', '.join(missing_client_ids)}"
-            )
+        
+        active_client_ids = {c.id for c in active_clients}
+        
+        # Check for missing or inactive clients
+        missing_or_inactive = client_id_strs - active_client_ids
+        if missing_or_inactive:
+            # Check which ones exist but are not ACTIVE status
+            all_existing = db.query(Client).filter(
+                Client.id.in_(missing_or_inactive),
+                Client.is_active == True
+            ).all()
+            
+            inactive_status_clients = [c.name for c in all_existing if c.status != ClientStatus.ACTIVE]
+            
+            if inactive_status_clients:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot add entries for clients with inactive status: {', '.join(inactive_status_clients)}. Please contact admin to activate these clients."
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Clients not found or have been removed: {', '.join(missing_or_inactive)}"
+                )
     
     # Check if task entry already exists for this date
     existing = db.query(TaskEntry).filter(

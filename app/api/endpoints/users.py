@@ -4,7 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from app.db.session import get_db
 from app.models.user import User, UserRole
-from app.schemas import UserCreate, UserUpdate, UserResponse
+from app.schemas import UserCreate, UserUpdate, UserResponse, PasswordResetRequest, PasswordResetResponse
 from app.core.security import get_password_hash
 from app.api.dependencies import require_admin, get_current_user
 
@@ -88,14 +88,14 @@ def update_user(
     return user
 
 
-@router.post("/{user_id}/reset-password")
+@router.post("/{user_id}/reset-password", response_model=PasswordResetResponse)
 def reset_password(
     user_id: str,
-    new_password: str,
+    password_data: PasswordResetRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Reset user password (admin only)."""
+    """Reset user password (admin only). Returns the new password for display."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
@@ -103,14 +103,39 @@ def reset_password(
             detail="User not found"
         )
     
-    if len(new_password) < 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 6 characters"
-        )
-    
-    user.password_hash = get_password_hash(new_password)
+    user.password_hash = get_password_hash(password_data.new_password)
     user.updated_by = current_user.id
     
     db.commit()
-    return {"message": "Password reset successfully"}
+    return {
+        "message": "Password reset successfully",
+        "new_password": password_data.new_password
+    }
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Soft delete a user by setting is_active to False (admin only)."""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Prevent admin from deleting themselves
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete yourself"
+        )
+    
+    user.is_active = False
+    user.updated_by = current_user.id
+    
+    db.commit()
+    return None

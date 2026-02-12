@@ -103,7 +103,7 @@ def delete_task_master(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Delete a task master (admin only). Use toggle to deactivate instead if you want to keep history."""
+    """Soft delete a task master by setting is_active to False (admin only)."""
     task_master = db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
     
     if not task_master:
@@ -112,6 +112,9 @@ def delete_task_master(
             detail="Task master not found"
         )
     
-    db.delete(task_master)
+    # Soft delete: set is_active to False instead of deleting
+    task_master.is_active = False
+    task_master.updated_by = current_user.id
+    
     db.commit()
     return None

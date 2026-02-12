@@ -19,14 +19,12 @@ def get_my_profile(
     return current_user
 
 
-@router.patch("/me", response_model=ProfileUpdateResponse)
-def update_my_profile(
+def _update_profile(
     profile_update: ProfileUpdateRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update current user's profile"""
-    
+    current_user: User,
+    db: Session
+) -> ProfileUpdateResponse:
+    """Internal function to update profile"""
     # Check if email is being changed and if it's already taken
     if profile_update.email and profile_update.email != current_user.email:
         existing_user = db.query(User).filter(User.email == profile_update.email).first()
@@ -50,6 +48,26 @@ def update_my_profile(
         email=current_user.email,
         message="Profile updated successfully"
     )
+
+
+@router.patch("/me", response_model=ProfileUpdateResponse)
+def update_my_profile_patch(
+    profile_update: ProfileUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's profile (PATCH method)"""
+    return _update_profile(profile_update, current_user, db)
+
+
+@router.put("/me", response_model=ProfileUpdateResponse)
+def update_my_profile_put(
+    profile_update: ProfileUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's profile (PUT method)"""
+    return _update_profile(profile_update, current_user, db)
 
 
 @router.post("/change-password")
