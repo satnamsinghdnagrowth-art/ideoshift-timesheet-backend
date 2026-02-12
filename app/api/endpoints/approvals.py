@@ -34,7 +34,7 @@ def list_pending_task_entries(
 
 @router.post("/task-entries/{task_entry_id}/approve", response_model=TaskEntryResponse)
 def approve_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     approval_data: ApprovalRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -67,7 +67,7 @@ def approve_task_entry(
 
 @router.post("/task-entries/{task_entry_id}/reject", response_model=TaskEntryResponse)
 def reject_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     reject_data: RejectRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -119,7 +119,7 @@ def list_pending_leaves(
 
 @router.post("/leaves/{leave_request_id}/approve", response_model=LeaveRequestResponse)
 def approve_leave(
-    leave_request_id: UUID,
+    leave_request_id: str,
     approval_data: ApprovalRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -152,7 +152,7 @@ def approve_leave(
 
 @router.post("/leaves/{leave_request_id}/reject", response_model=LeaveRequestResponse)
 def reject_leave(
-    leave_request_id: UUID,
+    leave_request_id: str,
     reject_data: RejectRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)

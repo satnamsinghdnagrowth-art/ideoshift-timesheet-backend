@@ -67,8 +67,8 @@ def get_admin_stats(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     date_range: Optional[str] = Query('today'),  # Default to 'today'
-    client_id: Optional[UUID] = Query(None),
-    user_id: Optional[UUID] = Query(None),
+    client_id: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
     is_profitable: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)

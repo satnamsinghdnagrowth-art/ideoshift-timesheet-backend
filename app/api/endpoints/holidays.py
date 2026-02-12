@@ -171,7 +171,7 @@ def create_holidays_bulk(
 
 @router.get("/{holiday_id}", response_model=HolidayResponse)
 def get_holiday(
-    holiday_id: UUID,
+    holiday_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -188,9 +188,9 @@ def get_holiday(
     return holiday
 
 
-@router.put("/{holiday_id}", response_model=HolidayResponse)
+@router.patch("/{holiday_id}", response_model=HolidayResponse)
 def update_holiday(
-    holiday_id: UUID,
+    holiday_id: str,
     holiday_data: HolidayUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -225,7 +225,7 @@ def update_holiday(
 
 @router.delete("/{holiday_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_holiday(
-    holiday_id: UUID,
+    holiday_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

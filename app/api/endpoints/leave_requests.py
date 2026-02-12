@@ -124,7 +124,7 @@ def create_leave_request(
 
 @router.get("/{leave_request_id}", response_model=LeaveRequestResponse)
 def get_leave_request(
-    leave_request_id: UUID,
+    leave_request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -145,7 +145,7 @@ def get_leave_request(
 
 @router.delete("/{leave_request_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_leave_request(
-    leave_request_id: UUID,
+    leave_request_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

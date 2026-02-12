@@ -64,17 +64,17 @@ def get_timesheet_report(
     
     # Multi-select filters
     if user_ids:
-        user_id_list = [UUID(uid.strip()) for uid in user_ids.split(',') if uid.strip()]
+        user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
         if user_id_list:
             query = query.filter(TaskEntry.user_id.in_(user_id_list))
     
     if client_ids:
-        client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
             query = query.filter(TaskEntry.client_id.in_(client_id_list))
     
     if task_master_ids:
-        task_master_id_list = [UUID(tmid.strip()) for tmid in task_master_ids.split(',') if tmid.strip()]
+        task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
             query = query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
@@ -296,17 +296,17 @@ async def export_to_excel(
     
     # Multi-select filters
     if client_ids:
-        client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
             query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
     
     if user_ids:
-        user_id_list = [UUID(uid.strip()) for uid in user_ids.split(',') if uid.strip()]
+        user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
         if user_id_list:
             query = query.filter(TaskEntry.user_id.in_(user_id_list))
     
     if task_master_ids:
-        task_master_id_list = [UUID(tmid.strip()) for tmid in task_master_ids.split(',') if tmid.strip()]
+        task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
     
@@ -538,12 +538,12 @@ def get_my_timesheet_report(
     
     # Multi-select filters
     if client_ids:
-        client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
             query = query.filter(TaskEntry.client_id.in_(client_id_list))
     
     if task_master_ids:
-        task_master_id_list = [UUID(tmid.strip()) for tmid in task_master_ids.split(',') if tmid.strip()]
+        task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
             query = query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
@@ -620,12 +620,12 @@ async def export_my_report_to_excel(
     
     # Multi-select filters
     if client_ids:
-        client_id_list = [UUID(cid.strip()) for cid in client_ids.split(',') if cid.strip()]
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
             query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
     
     if task_master_ids:
-        task_master_id_list = [UUID(tmid.strip()) for tmid in task_master_ids.split(',') if tmid.strip()]
+        task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
     

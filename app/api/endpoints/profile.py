@@ -19,7 +19,7 @@ def get_my_profile(
     return current_user
 
 
-@router.put("/me", response_model=ProfileUpdateResponse)
+@router.patch("/me", response_model=ProfileUpdateResponse)
 def update_my_profile(
     profile_update: ProfileUpdateRequest,
     current_user: User = Depends(get_current_user),

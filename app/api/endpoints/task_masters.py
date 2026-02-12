@@ -60,9 +60,9 @@ def create_task_master(
     return task_master
 
 
-@router.put("/{task_master_id}", response_model=TaskMasterResponse)
+@router.patch("/{task_master_id}", response_model=TaskMasterResponse)
 def update_task_master(
-    task_master_id: UUID,
+    task_master_id: str,
     task_master_update: TaskMasterUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -99,11 +99,11 @@ def update_task_master(
 
 @router.delete("/{task_master_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task_master(
-    task_master_id: UUID,
+    task_master_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Soft delete a task master by setting is_active=False (admin only)."""
+    """Delete a task master (admin only). Use toggle to deactivate instead if you want to keep history."""
     task_master = db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
     
     if not task_master:
@@ -112,8 +112,6 @@ def delete_task_master(
             detail="Task master not found"
         )
     
-    task_master.is_active = False
-    task_master.updated_by = current_user.id
-    
+    db.delete(task_master)
     db.commit()
     return None

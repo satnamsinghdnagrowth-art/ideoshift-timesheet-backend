@@ -79,7 +79,7 @@ def create_working_saturday(
 
 @router.get("/{working_saturday_id}", response_model=WorkingSaturdayResponse)
 def get_working_saturday(
-    working_saturday_id: UUID,
+    working_saturday_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
@@ -93,9 +93,9 @@ def get_working_saturday(
     return ws
 
 
-@router.put("/{working_saturday_id}", response_model=WorkingSaturdayResponse)
+@router.patch("/{working_saturday_id}", response_model=WorkingSaturdayResponse)
 def update_working_saturday(
-    working_saturday_id: UUID,
+    working_saturday_id: str,
     working_saturday_update: WorkingSaturdayCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -140,7 +140,7 @@ def update_working_saturday(
 
 @router.delete("/{working_saturday_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_working_saturday(
-    working_saturday_id: UUID,
+    working_saturday_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):

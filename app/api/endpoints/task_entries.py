@@ -101,7 +101,7 @@ def list_task_entries(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     status_filter: Optional[TaskEntryStatus] = Query(None, alias="status"),
-    client_id: Optional[UUID] = Query(None),
+    client_id: Optional[str] = Query(None),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -131,14 +131,21 @@ def create_task_entry(
 ):
     """Create a new task entry with per-sub-task client tracking."""
     
-    # Validate all clients in sub-entries exist (skip None values for leave tasks)
+    # Validate all clients in sub-entries exist and are active (skip None values for leave tasks)
     client_ids = {sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None}
     if client_ids:
-        clients = db.query(Client).filter(Client.id.in_(client_ids)).all()
-        if len(clients) != len(client_ids):
+        # Convert UUIDs to strings for database query (Client.id is String type)
+        client_id_strs = {str(cid) for cid in client_ids}
+        clients = db.query(Client).filter(
+            Client.id.in_(client_id_strs),
+            Client.is_active == True
+        ).all()
+        found_client_ids = {c.id for c in clients}
+        missing_client_ids = client_id_strs - found_client_ids
+        if missing_client_ids:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="One or more clients not found"
+                detail=f"Clients not found or inactive: {', '.join(missing_client_ids)}"
             )
     
     # Check if task entry already exists for this date
@@ -179,7 +186,7 @@ def create_task_entry(
     first_client_id = next((sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None), None)
     task_entry = TaskEntry(
         user_id=current_user.id,
-        client_id=task_entry_create.client_id or first_client_id,  # Use first non-None sub-entry client if not specified
+        client_id=str(task_entry_create.client_id) if task_entry_create.client_id else (str(first_client_id) if first_client_id else None),
         work_date=task_entry_create.work_date,
         task_name=task_entry_create.task_name,
         description=task_entry_create.description,
@@ -197,23 +204,23 @@ def create_task_entry(
     # Create sub-entries with individual client tracking
     for sub_data in task_entry_create.sub_entries:
         # Get task master to determine if productive
-        task_master = db.query(TaskMaster).filter(TaskMaster.id == sub_data.task_master_id).first()
+        task_master = db.query(TaskMaster).filter(TaskMaster.id == str(sub_data.task_master_id)).first()
         if not task_master:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Task master not found: {sub_data.task_master_id}"
             )
         
-        # Create sub-entry with client_id
+        # Create sub-entry with client_id (convert UUID to string)
         sub_entry = TaskSubEntry(
             task_entry_id=task_entry.id,
-            client_id=sub_data.client_id,  # NEW: Individual client per sub-task
+            client_id=str(sub_data.client_id) if sub_data.client_id else None,
             title=sub_data.title,
             description=sub_data.description,
             hours=sub_data.hours,
             productive=task_master.is_profitable,  # Auto-set from task master
             production=sub_data.production,
-            task_master_id=sub_data.task_master_id
+            task_master_id=str(sub_data.task_master_id)
         )
         db.add(sub_entry)
     
@@ -224,7 +231,7 @@ def create_task_entry(
 
 @router.get("/{task_entry_id}", response_model=TaskEntryResponse)
 def get_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -245,7 +252,7 @@ def get_task_entry(
 
 @router.patch("/{task_entry_id}", response_model=TaskEntryResponse)
 def update_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     task_entry_update: TaskEntryUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -331,7 +338,7 @@ def update_task_entry(
 
 @router.post("/{task_entry_id}/submit", response_model=TaskEntryResponse)
 def submit_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -364,7 +371,7 @@ def submit_task_entry(
 
 @router.delete("/{task_entry_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task_entry(
-    task_entry_id: UUID,
+    task_entry_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

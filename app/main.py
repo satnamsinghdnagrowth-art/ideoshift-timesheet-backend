@@ -8,11 +8,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware - Allow both localhost and network IP access
+# CORS middleware - Allow frontend domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,   # IMPORTANT when using "*"
+    allow_origins=[
+        "http://localhost:3000",  # Local development
+        "https://ideoshift.dnagrowth.com",  # GoDaddy production
+        "https://ideoshift-frontend-2026.azurewebsites.net",  # Azure (if used)
+        "*"  # Allow all (can remove if security concern)
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -55,7 +55,7 @@ def create_user(
 
 @router.patch("/{user_id}", response_model=UserResponse)
 def update_user(
-    user_id: UUID,
+    user_id: str,
     user_update: UserUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -90,7 +90,7 @@ def update_user(
 
 @router.post("/{user_id}/reset-password")
 def reset_password(
-    user_id: UUID,
+    user_id: str,
     new_password: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)

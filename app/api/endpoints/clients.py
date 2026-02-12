@@ -57,7 +57,7 @@ def create_client(
 
 @router.get("/{client_id}", response_model=ClientResponse)
 def get_client(
-    client_id: UUID,
+    client_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -73,7 +73,7 @@ def get_client(
 
 @router.patch("/{client_id}", response_model=ClientResponse)
 def update_client(
-    client_id: UUID,
+    client_id: str,
     client_update: ClientUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -108,7 +108,7 @@ def update_client(
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_client(
-    client_id: UUID,
+    client_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
