@@ -54,7 +54,7 @@ class TaskSubEntry(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     task_entry_id = Column(String(36), ForeignKey("task_entries.id", ondelete="CASCADE"), nullable=False)
-    client_id = Column(String(36), ForeignKey("clients.id"), nullable=False)  # NEW: Client per sub-task
+    client_id = Column(String(36), ForeignKey("clients.id"), nullable=True)  # Nullable for leave tasks
     task_master_id = Column(String(36), ForeignKey("task_masters.id"), nullable=True)
     title = Column(String(255), nullable=False)
     description = Column(String(500), nullable=True)

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
+import uuid
 from uuid import UUID
 from datetime import date
 from decimal import Decimal
@@ -13,7 +14,7 @@ from app.models.task_master import TaskMaster
 from app.models.working_saturday import WorkingSaturday
 from app.models.holiday import Holiday
 from app.schemas import TaskEntryCreate, TaskEntryUpdate, TaskEntryResponse
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, require_admin
 
 router = APIRouter(prefix="/task-entries", tags=["Task Entries"])
 
@@ -42,9 +43,9 @@ def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) ->
     Returns: (status, is_overtime, overtime_hours)
     
     Auto-approval rules (priority order):
-    1. Holiday: All hours are overtime, PENDING (requires approval)
-    2. Working Saturday with ≤ 8 hours: APPROVED
-    3. Weekday with exactly 8 hours: APPROVED
+    1. Exactly 8 hours on any day: APPROVED (includes leave entries)
+    2. Holiday: All hours are overtime, PENDING (requires approval)
+    3. Working Saturday with ≤ 8 hours: APPROVED
     4. Everything else: PENDING (requires admin approval)
     
     Overtime rules:
@@ -58,7 +59,18 @@ def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) ->
     is_hol = is_holiday(work_date, db)
     is_work_sat = is_sat and is_working_saturday(work_date, db)
     
-    # Priority 1: Holiday (all hours are overtime, requires approval)
+    # Priority 1: Exactly 8 hours = Auto-approve (NEW RULE - highest priority)
+    if total_hours == 8:
+        # Check if it's a holiday (holiday hours are still overtime)
+        if is_hol:
+            return TaskEntryStatus.APPROVED, True, total_hours
+        # Check if it's a non-working weekend
+        elif (is_sat or is_sun) and not is_work_sat:
+            return TaskEntryStatus.APPROVED, True, total_hours
+        else:
+            return TaskEntryStatus.APPROVED, False, Decimal(0)
+    
+    # Priority 2: Holiday (all hours are overtime, requires approval)
     if is_hol:
         return TaskEntryStatus.PENDING, True, total_hours
     
@@ -79,11 +91,6 @@ def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) ->
         status = TaskEntryStatus.PENDING  # Requires approval
     elif is_work_sat and total_hours <= 8:
         # Working Saturday with ≤ 8 hours: auto-approved
-        overtime_hours = Decimal(0)
-        is_overtime = False
-        status = TaskEntryStatus.APPROVED
-    elif total_hours == 8:
-        # Weekday with exactly 8 hours: auto-approved
         overtime_hours = Decimal(0)
         is_overtime = False
         status = TaskEntryStatus.APPROVED
@@ -108,7 +115,12 @@ def list_task_entries(
     current_user: User = Depends(get_current_user)
 ):
     """List task entries for the current user."""
-    query = db.query(TaskEntry).filter(TaskEntry.user_id == current_user.id)
+    query = db.query(TaskEntry).filter(TaskEntry.user_id == current_user.id).options(
+        joinedload(TaskEntry.user),
+        joinedload(TaskEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
+    )
     
     if from_date:
         query = query.filter(TaskEntry.work_date >= from_date)
@@ -123,6 +135,42 @@ def list_task_entries(
     return task_entries
 
 
+@router.get("/admin/all", response_model=List[TaskEntryResponse])
+def admin_list_all_task_entries(
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    status_filter: Optional[TaskEntryStatus] = Query(None, alias="status"),
+    user_id: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    skip: int = 0,
+    limit: int = 1000,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: List all task entries from all users."""
+    query = db.query(TaskEntry).options(
+        joinedload(TaskEntry.user),
+        joinedload(TaskEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
+    )
+    
+    if from_date:
+        query = query.filter(TaskEntry.work_date >= from_date)
+    if to_date:
+        query = query.filter(TaskEntry.work_date <= to_date)
+    if status_filter:
+        query = query.filter(TaskEntry.status == status_filter)
+    if user_id:
+        query = query.filter(TaskEntry.user_id == user_id)
+    if client_id:
+        query = query.filter(TaskEntry.client_id == client_id)
+    
+    query = query.order_by(TaskEntry.work_date.desc(), TaskEntry.created_at.desc())
+    
+    return query.offset(skip).limit(limit).all()
+
+
 @router.post("", response_model=TaskEntryResponse, status_code=status.HTTP_201_CREATED)
 def create_task_entry(
     task_entry_create: TaskEntryCreate,
@@ -131,8 +179,25 @@ def create_task_entry(
 ):
     """Create a new task entry with per-sub-task client tracking."""
     
-    # Validate all clients in sub-entries exist, are active, and have ACTIVE status
-    client_ids = {sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None}
+    # Helper function to check if a task is a leave task
+    def is_leave_task(task_master_id: str) -> bool:
+        task_master = db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
+        if not task_master:
+            return False
+        
+        # Method 1: Check is_profitable field (most reliable)
+        if hasattr(task_master, 'is_profitable') and task_master.is_profitable is False:
+            return True
+        
+        # Method 2: Check name for leave-related keywords (backup)
+        task_name_lower = task_master.name.lower()
+        return any(keyword in task_name_lower for keyword in ['leave', 'sick', 'vacation', 'absent', 'holiday', 'off day', 'time off'])
+    
+    # Validate all NON-LEAVE clients in sub-entries exist, are active, and have ACTIVE status
+    client_ids = {
+        sub.client_id for sub in task_entry_create.sub_entries 
+        if sub.client_id is not None and not is_leave_task(str(sub.task_master_id))
+    }
     if client_ids:
         # Convert UUIDs to strings for database query (Client.id is String type)
         client_id_strs = {str(cid) for cid in client_ids}
@@ -260,6 +325,11 @@ def get_task_entry(
     task_entry = db.query(TaskEntry).filter(
         TaskEntry.id == task_entry_id,
         TaskEntry.user_id == current_user.id
+    ).options(
+        joinedload(TaskEntry.user),
+        joinedload(TaskEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     ).first()
     
     if not task_entry:
@@ -396,7 +466,7 @@ def delete_task_entry(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Delete a task entry (only if DRAFT or REJECTED)."""
+    """Delete a task entry (DRAFT, PENDING, REJECTED, or APPROVED entries)."""
     task_entry = db.query(TaskEntry).filter(
         TaskEntry.id == task_entry_id,
         TaskEntry.user_id == current_user.id
@@ -408,13 +478,101 @@ def delete_task_entry(
             detail="Task entry not found"
         )
     
-    # Allow deletion of DRAFT, PENDING (before admin approval), and REJECTED entries
-    if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.PENDING, TaskEntryStatus.REJECTED]:
+    # Allow deletion of DRAFT, PENDING, REJECTED, and APPROVED entries
+    # Users can now delete auto-approved entries
+    if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.PENDING, TaskEntryStatus.REJECTED, TaskEntryStatus.APPROVED]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete approved task entries"
+            detail="Cannot delete this task entry"
         )
     
     db.delete(task_entry)
     db.commit()
     return None
+
+
+@router.delete("/admin/{task_entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_task_entry(
+    task_entry_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: Delete any task entry regardless of status."""
+    task_entry = db.query(TaskEntry).filter(TaskEntry.id == task_entry_id).first()
+    
+    if not task_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task entry not found"
+        )
+    
+    db.delete(task_entry)
+    db.commit()
+    return None
+
+
+@router.put("/admin/{task_entry_id}", response_model=TaskEntryResponse)
+def admin_update_task_entry(
+    task_entry_id: str,
+    task_entry_update: TaskEntryUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: Update any task entry regardless of status."""
+    task_entry = db.query(TaskEntry).filter(TaskEntry.id == task_entry_id).first()
+    
+    if not task_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task entry not found"
+        )
+    
+    # Update basic fields if provided
+    if task_entry_update.task_name is not None:
+        task_entry.task_name = task_entry_update.task_name
+    if task_entry_update.description is not None:
+        task_entry.description = task_entry_update.description
+    if task_entry_update.client_id is not None:
+        task_entry.client_id = str(task_entry_update.client_id)
+    
+    # Update sub-entries if provided
+    if task_entry_update.sub_entries is not None:
+        # Delete old sub-entries
+        for sub in task_entry.sub_entries:
+            db.delete(sub)
+        
+        # Create new sub-entries
+        total_hours = 0
+        for sub_data in task_entry_update.sub_entries:
+            # Get task master to determine productive status
+            task_master = db.query(TaskMaster).filter(
+                TaskMaster.id == str(sub_data.task_master_id)
+            ).first()
+            
+            if not task_master:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Task master not found: {sub_data.task_master_id}"
+                )
+            
+            sub_entry = TaskSubEntry(
+                id=str(uuid.uuid4()),
+                task_entry_id=task_entry.id,
+                client_id=str(sub_data.client_id) if sub_data.client_id else None,
+                task_master_id=str(sub_data.task_master_id),
+                title=sub_data.title,
+                description=sub_data.description,
+                hours=sub_data.hours,
+                productive=task_master.is_profitable if hasattr(task_master, 'is_profitable') else True,
+                production=sub_data.production
+            )
+            db.add(sub_entry)
+            total_hours += float(sub_data.hours)
+        
+        task_entry.total_hours = total_hours
+    
+    task_entry.updated_by = current_user.id
+    
+    db.commit()
+    db.refresh(task_entry)
+    return task_entry

@@ -162,6 +162,8 @@ class TaskSubEntryResponse(TaskSubEntryBase):
     task_entry_id: UUID
     created_at: datetime
     updated_at: datetime
+    client: Optional['ClientResponse'] = None
+    task_master: Optional['TaskMasterResponse'] = None
 
     class Config:
         from_attributes = True
