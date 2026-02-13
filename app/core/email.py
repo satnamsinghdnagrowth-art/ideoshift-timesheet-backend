@@ -52,7 +52,9 @@ class EmailService:
 
     def send_password_reset_email(self, to_email: str, reset_token: str) -> bool:
         """Send password reset email with professional template"""
-        reset_link = f"{self.frontend_url}/reset-password?token={reset_token}"
+        # Remove trailing slash from frontend_url to avoid double slashes
+        frontend_url = self.frontend_url.rstrip('/')
+        reset_link = f"{frontend_url}/reset-password?token={reset_token}"
         
         subject = "Reset Your Ideoshift Password"
         
