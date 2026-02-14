@@ -118,6 +118,7 @@ def list_task_entries(
     query = db.query(TaskEntry).filter(TaskEntry.user_id == current_user.id).options(
         joinedload(TaskEntry.user),
         joinedload(TaskEntry.client),
+        joinedload(TaskEntry.approver),
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     )
@@ -151,6 +152,7 @@ def admin_list_all_task_entries(
     query = db.query(TaskEntry).options(
         joinedload(TaskEntry.user),
         joinedload(TaskEntry.client),
+        joinedload(TaskEntry.approver),
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     )
@@ -381,7 +383,7 @@ def update_task_entry(
         total_hours = Decimal(0)
         for sub_data in task_entry_update.sub_entries:
             # Get task master to determine if productive
-            task_master = db.query(TaskMaster).filter(TaskMaster.id == sub_data.task_master_id).first()
+            task_master = db.query(TaskMaster).filter(TaskMaster.id == str(sub_data.task_master_id)).first()
             if not task_master:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -396,8 +398,8 @@ def update_task_entry(
                 hours=sub_data.hours,
                 productive=task_master.is_profitable,  # Auto-set from task master
                 production=sub_data.production,
-                task_master_id=sub_data.task_master_id,
-                client_id=sub_data.client_id  # Add client_id support
+                task_master_id=str(sub_data.task_master_id),
+                client_id=str(sub_data.client_id) if sub_data.client_id else None
             )
             db.add(sub_entry)
             total_hours += sub_data.hours

@@ -220,6 +220,7 @@ class TaskEntryResponse(TaskEntryBase):
     sub_entries: List[TaskSubEntryResponse] = []
     user: Optional[UserResponse] = None
     client: Optional[ClientResponse] = None
+    approver: Optional[UserResponse] = None  # Admin who approved the entry
 
     class Config:
         from_attributes = True

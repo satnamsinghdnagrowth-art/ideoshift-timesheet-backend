@@ -75,17 +75,25 @@ def get_admin_stats(
 ):
     """Get admin dashboard statistics with filters (admin only)."""
     # Handle date_range filter
-    if date_range:
+    use_date_filter = True
+    if date_range == 'all':
+        # Special case: no date filtering for badges
+        use_date_filter = False
+        from_date = to_date = date.today()  # Dummy values for later use
+    elif date_range:
         from_date, to_date = get_date_range(date_range)
     elif not from_date or not to_date:
         # Default to today if no filter provided
         from_date = to_date = date.today()
     
     # Base query for task entries
-    base_query = db.query(TaskEntry).filter(
-        TaskEntry.work_date >= from_date,
-        TaskEntry.work_date <= to_date
-    )
+    base_query = db.query(TaskEntry)
+    
+    if use_date_filter:
+        base_query = base_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
     
     # Apply filters - exclude admin users
     base_query = base_query.join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE')
