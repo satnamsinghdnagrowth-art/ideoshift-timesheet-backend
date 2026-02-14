@@ -22,16 +22,17 @@ def list_clients(
     """
     List clients with optional search.
     - Admin: See all clients (any status) that are not deleted (is_active=true)
-    - Employee: See only ACTIVE status clients for task entry creation
+    - Employee: See ACTIVE, DEMO, BACKLOG status clients (exclude INACTIVE status)
+    Note: is_active=true means not deleted, status determines operational state
     """
     from app.models.client import ClientStatus
     
-    # Base query - only non-deleted clients
+    # Base query - only non-deleted clients (is_active=true)
     query = db.query(Client).filter(Client.is_active == True)
     
-    # For employees, also filter by ACTIVE status
+    # For employees, filter out INACTIVE status (show ACTIVE, DEMO, BACKLOG)
     if current_user.role != UserRole.ADMIN:
-        query = query.filter(Client.status == ClientStatus.ACTIVE)
+        query = query.filter(Client.status != ClientStatus.INACTIVE)
     
     if search:
         query = query.filter(Client.name.ilike(f"%{search}%"))

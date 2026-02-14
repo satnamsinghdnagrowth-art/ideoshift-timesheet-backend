@@ -28,6 +28,13 @@ class HoursChartDataPoint(BaseModel):
     name: str
     hours: float
 
+class ClientHoursBreakdown(BaseModel):
+    client_id: str
+    client_name: str
+    total_hours: float
+    task_count: int
+    percentage: float
+
 class ChartMetadata(BaseModel):
     granularity: str  # 'hourly', 'daily', 'weekly', 'monthly'
     period_label: str
@@ -588,3 +595,55 @@ def get_employee_stats(
         weekly_hours_chart=weekly_hours_chart,
         chart_metadata=chart_metadata
     )
+
+
+@router.get("/employee/client-hours", response_model=List[ClientHoursBreakdown])
+def get_employee_client_hours(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    date_range: str = Query("this_month", description="Date range filter")
+):
+    """Get employee's hours breakdown by client for the selected period."""
+    # Get date range
+    from_date, to_date = get_date_range(date_range)
+    
+    # Query client-wise hours for the employee
+    client_hours_query = (
+        db.query(
+            Client.id.label('client_id'),
+            Client.name.label('client_name'),
+            func.sum(TaskEntry.total_hours).label('total_hours'),
+            func.count(TaskEntry.id).label('task_count')
+        )
+        .join(TaskEntry, Client.id == TaskEntry.client_id)
+        .filter(
+            TaskEntry.user_id == current_user.id,
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date,
+            TaskEntry.status == TaskEntryStatus.APPROVED
+        )
+        .group_by(Client.id, Client.name)
+        .order_by(func.sum(TaskEntry.total_hours).desc())
+        .limit(10)  # Top 10 clients
+    )
+    
+    results = client_hours_query.all()
+    
+    # Calculate total hours for percentage
+    total_hours = sum(float(row.total_hours or 0) for row in results)
+    
+    # Format response
+    client_breakdown = []
+    for row in results:
+        hours = float(row.total_hours or 0)
+        percentage = (hours / total_hours * 100) if total_hours > 0 else 0
+        
+        client_breakdown.append(ClientHoursBreakdown(
+            client_id=str(row.client_id),
+            client_name=row.client_name,
+            total_hours=round(hours, 1),
+            task_count=row.task_count,
+            percentage=round(percentage, 1)
+        ))
+    
+    return client_breakdown
