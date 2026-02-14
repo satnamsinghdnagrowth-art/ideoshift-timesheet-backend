@@ -80,6 +80,11 @@ def get_admin_stats(
         # Special case: no date filtering for badges
         use_date_filter = False
         from_date = to_date = date.today()  # Dummy values for later use
+    elif date_range == 'custom':
+        # Custom date range - use provided from_date and to_date
+        if not from_date or not to_date:
+            # Default to today if custom selected but dates not provided
+            from_date = to_date = date.today()
     elif date_range:
         from_date, to_date = get_date_range(date_range)
     elif not from_date or not to_date:

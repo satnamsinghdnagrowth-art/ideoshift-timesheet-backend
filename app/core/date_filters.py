@@ -9,7 +9,7 @@ def get_date_range(filter_type: str) -> Tuple[date, date]:
     Supported filter types:
     - 'today': Current day
     - 'yesterday': Previous day
-    - 'current_week': Monday to Sunday of current week
+    - 'this_week' or 'current_week': Monday to Sunday of current week
     - 'last_week': Monday to Sunday of previous week
     - 'this_month': First to last day of current month
     - 'last_month': First to last day of previous month
@@ -25,7 +25,7 @@ def get_date_range(filter_type: str) -> Tuple[date, date]:
         yesterday = today - timedelta(days=1)
         return (yesterday, yesterday)
     
-    elif filter_type == 'current_week':
+    elif filter_type == 'this_week' or filter_type == 'current_week':
         # Monday of current week (weekday: 0=Monday, 6=Sunday)
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)  # Sunday

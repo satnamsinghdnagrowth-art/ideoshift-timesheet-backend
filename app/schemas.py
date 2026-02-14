@@ -181,10 +181,21 @@ class TaskEntryCreate(TaskEntryBase):
     sub_entries: List[TaskSubEntryCreate] = Field(..., min_items=1)
 
     @validator('sub_entries')
-    def validate_total_hours(cls, v):
-        total = sum(sub.hours for sub in v)
-        if total <= 0:
-            raise ValueError('Total hours must be greater than 0')
+    def validate_hours_or_production(cls, v):
+        """
+        Validate that each sub-entry has either:
+        - Hours > 0 (for regular tasks), OR
+        - Production > 0 (for GP Tasks where hours are not required)
+        
+        The actual task master validation (to determine if it's a GP Task)
+        will be done in the endpoint after fetching task master details.
+        """
+        for sub in v:
+            if sub.hours <= 0 and sub.production <= 0:
+                raise ValueError(
+                    'Each task must have either hours > 0 or production > 0. '
+                    'GP Tasks require production, other tasks require hours.'
+                )
         return v
     
     # Removed client_id validation to allow leave tasks without clients
@@ -197,11 +208,19 @@ class TaskEntryUpdate(BaseModel):
     sub_entries: Optional[List[TaskSubEntryCreate]] = None
 
     @validator('sub_entries')
-    def validate_total_hours(cls, v):
+    def validate_hours_or_production(cls, v):
+        """
+        Validate that each sub-entry has either:
+        - Hours > 0 (for regular tasks), OR
+        - Production > 0 (for GP Tasks where hours are not required)
+        """
         if v is not None:
-            total = sum(sub.hours for sub in v)
-            if total <= 0:
-                raise ValueError('Total hours must be greater than 0')
+            for sub in v:
+                if sub.hours <= 0 and sub.production <= 0:
+                    raise ValueError(
+                        'Each task must have either hours > 0 or production > 0. '
+                        'GP Tasks require production, other tasks require hours.'
+                    )
         return v
 
 

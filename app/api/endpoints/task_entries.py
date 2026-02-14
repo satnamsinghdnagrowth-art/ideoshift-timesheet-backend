@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_, select
 from typing import List, Optional
 import uuid
 from uuid import UUID
@@ -108,13 +109,21 @@ def list_task_entries(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     status_filter: Optional[TaskEntryStatus] = Query(None, alias="status"),
-    client_id: Optional[str] = Query(None),
+    client_ids: Optional[str] = Query(None, description="Comma-separated list of client IDs"),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List task entries for the current user."""
+    """
+    List task entries for the current user with advanced filtering.
+    
+    Supports:
+    - Date range filtering (from_date, to_date)
+    - Status filtering (status)
+    - Multiple client filtering (client_ids as comma-separated)
+    - Pagination (skip, limit)
+    """
     query = db.query(TaskEntry).filter(TaskEntry.user_id == current_user.id).options(
         joinedload(TaskEntry.user),
         joinedload(TaskEntry.client),
@@ -123,14 +132,34 @@ def list_task_entries(
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     )
     
+    # Date range filtering
     if from_date:
         query = query.filter(TaskEntry.work_date >= from_date)
     if to_date:
         query = query.filter(TaskEntry.work_date <= to_date)
+    
+    # Status filtering
     if status_filter:
         query = query.filter(TaskEntry.status == status_filter)
-    if client_id:
-        query = query.filter(TaskEntry.client_id == client_id)
+    
+    # Multiple clients filtering - check both main client and sub-entry clients
+    if client_ids:
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
+        if client_id_list:
+            # Create a subquery to find task entries that have sub-entries with matching clients
+            subquery = db.query(TaskSubEntry.task_entry_id).filter(
+                TaskSubEntry.client_id.in_(client_id_list)
+            ).distinct().subquery()
+            
+            # Filter to include entries where either:
+            # 1. Main client_id matches, OR
+            # 2. Has a sub-entry with matching client_id
+            query = query.filter(
+                or_(
+                    TaskEntry.client_id.in_(client_id_list),
+                    TaskEntry.id.in_(db.query(subquery.c.task_entry_id))
+                )
+            )
     
     task_entries = query.order_by(TaskEntry.work_date.desc()).offset(skip).limit(limit).all()
     return task_entries
@@ -141,14 +170,23 @@ def admin_list_all_task_entries(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     status_filter: Optional[TaskEntryStatus] = Query(None, alias="status"),
-    user_id: Optional[str] = Query(None),
-    client_id: Optional[str] = Query(None),
+    user_ids: Optional[str] = Query(None, description="Comma-separated list of user IDs"),
+    client_ids: Optional[str] = Query(None, description="Comma-separated list of client IDs"),
     skip: int = 0,
     limit: int = 1000,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Admin: List all task entries from all users."""
+    """
+    Admin: List all task entries from all users with advanced filtering.
+    
+    Supports:
+    - Date range filtering (from_date, to_date)
+    - Status filtering (status)
+    - Multiple user filtering (user_ids as comma-separated)
+    - Multiple client filtering (client_ids as comma-separated)
+    - Pagination (skip, limit)
+    """
     query = db.query(TaskEntry).options(
         joinedload(TaskEntry.user),
         joinedload(TaskEntry.client),
@@ -157,16 +195,40 @@ def admin_list_all_task_entries(
         joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     )
     
+    # Date range filtering
     if from_date:
         query = query.filter(TaskEntry.work_date >= from_date)
     if to_date:
         query = query.filter(TaskEntry.work_date <= to_date)
+    
+    # Status filtering
     if status_filter:
         query = query.filter(TaskEntry.status == status_filter)
-    if user_id:
-        query = query.filter(TaskEntry.user_id == user_id)
-    if client_id:
-        query = query.filter(TaskEntry.client_id == client_id)
+    
+    # Multiple users filtering
+    if user_ids:
+        user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
+        if user_id_list:
+            query = query.filter(TaskEntry.user_id.in_(user_id_list))
+    
+    # Multiple clients filtering - check both main client and sub-entry clients
+    if client_ids:
+        client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
+        if client_id_list:
+            # Create a subquery to find task entries that have sub-entries with matching clients
+            subquery = db.query(TaskSubEntry.task_entry_id).filter(
+                TaskSubEntry.client_id.in_(client_id_list)
+            ).distinct().subquery()
+            
+            # Filter to include entries where either:
+            # 1. Main client_id matches, OR
+            # 2. Has a sub-entry with matching client_id
+            query = query.filter(
+                or_(
+                    TaskEntry.client_id.in_(client_id_list),
+                    TaskEntry.id.in_(db.query(subquery.c.task_entry_id))
+                )
+            )
     
     query = query.order_by(TaskEntry.work_date.desc(), TaskEntry.created_at.desc())
     
