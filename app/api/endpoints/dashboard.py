@@ -3,8 +3,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from uuid import UUID
+from calendar import monthrange
 from app.db.session import get_db
 from app.models.user import User, UserRole
 from app.models.task_entry import TaskEntry, TaskEntryStatus, TaskSubEntry
@@ -27,6 +28,10 @@ class HoursChartDataPoint(BaseModel):
     name: str
     hours: float
 
+class ChartMetadata(BaseModel):
+    granularity: str  # 'hourly', 'daily', 'weekly', 'monthly'
+    period_label: str
+
 class AdminDashboardStats(BaseModel):
     total_entries: int
     approved_entries: int
@@ -46,6 +51,7 @@ class AdminDashboardStats(BaseModel):
     # Chart data
     status_chart: List[ChartDataPoint]
     daily_hours_chart: List[HoursChartDataPoint]
+    chart_metadata: ChartMetadata
     client_breakdown: List[ChartDataPoint]
     profitable_breakdown: List[ChartDataPoint]
 
@@ -60,6 +66,211 @@ class EmployeeDashboardStats(BaseModel):
     my_hours_this_month: Decimal
     my_overtime_hours: Decimal
     my_pending_leave_requests: int
+    # Chart data
+    weekly_hours_chart: List[HoursChartDataPoint]
+    chart_metadata: ChartMetadata
+
+
+# Chart Generation Helper Functions
+def query_hours_for_period(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Decimal:
+    """Query total hours for a specific period."""
+    query = db.query(func.sum(TaskEntry.total_hours)).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED
+    )
+    
+    if user_id:
+        query = query.filter(TaskEntry.user_id == user_id)
+    else:
+        # For admin queries, filter employees only
+        query = query.join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        query = query.filter(TaskEntry.client_id == client_id)
+    
+    return query.scalar() or Decimal(0)
+
+
+def generate_hourly_chart(
+    db: Session,
+    target_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Tuple[List[HoursChartDataPoint], ChartMetadata]:
+    """Generate hourly chart for a single day."""
+    # Since we don't track hourly data, distribute total hours evenly across work hours (9-17)
+    total_hours = query_hours_for_period(db, target_date, target_date, user_id, client_id)
+    
+    chart_data = []
+    if total_hours > 0:
+        # Distribute hours across typical work hours (9 AM to 5 PM)
+        work_hours = [9, 10, 11, 12, 13, 14, 15, 16, 17]
+        hours_per_slot = float(total_hours) / len(work_hours)
+        
+        for hour in range(24):
+            if hour in work_hours:
+                chart_data.append(HoursChartDataPoint(
+                    name=f"{hour:02d}:00",
+                    hours=round(hours_per_slot, 2)
+                ))
+            else:
+                chart_data.append(HoursChartDataPoint(
+                    name=f"{hour:02d}:00",
+                    hours=0.0
+                ))
+    else:
+        # No data - return zeros
+        for hour in range(24):
+            chart_data.append(HoursChartDataPoint(
+                name=f"{hour:02d}:00",
+                hours=0.0
+            ))
+    
+    return chart_data, ChartMetadata(
+        granularity="hourly",
+        period_label=target_date.strftime("%B %d, %Y")
+    )
+
+
+def generate_daily_chart(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Tuple[List[HoursChartDataPoint], ChartMetadata]:
+    """Generate daily chart for a week or custom range."""
+    chart_data = []
+    current = from_date
+    
+    while current <= to_date:
+        day_hours = query_hours_for_period(db, current, current, user_id, client_id)
+        chart_data.append(HoursChartDataPoint(
+            name=current.strftime("%a %m/%d"),
+            hours=float(day_hours)
+        ))
+        current += timedelta(days=1)
+    
+    period_label = f"{from_date.strftime('%b %d')} - {to_date.strftime('%b %d, %Y')}"
+    
+    return chart_data, ChartMetadata(
+        granularity="daily",
+        period_label=period_label
+    )
+
+
+def generate_weekly_chart(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Tuple[List[HoursChartDataPoint], ChartMetadata]:
+    """Generate weekly chart for a month or custom range."""
+    chart_data = []
+    week_num = 1
+    current = from_date
+    
+    while current <= to_date:
+        week_end = min(current + timedelta(days=6), to_date)
+        week_hours = query_hours_for_period(db, current, week_end, user_id, client_id)
+        
+        chart_data.append(HoursChartDataPoint(
+            name=f"Week {week_num}",
+            hours=float(week_hours)
+        ))
+        
+        current = week_end + timedelta(days=1)
+        week_num += 1
+    
+    period_label = from_date.strftime("%B %Y")
+    
+    return chart_data, ChartMetadata(
+        granularity="weekly",
+        period_label=period_label
+    )
+
+
+def generate_monthly_chart(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Tuple[List[HoursChartDataPoint], ChartMetadata]:
+    """Generate monthly chart for a year or custom range."""
+    chart_data = []
+    current_month = from_date.replace(day=1)
+    
+    while current_month <= to_date:
+        # Get last day of month
+        _, last_day = monthrange(current_month.year, current_month.month)
+        month_end = current_month.replace(day=last_day)
+        
+        # Don't go beyond to_date
+        month_end = min(month_end, to_date)
+        
+        month_hours = query_hours_for_period(db, current_month, month_end, user_id, client_id)
+        
+        chart_data.append(HoursChartDataPoint(
+            name=current_month.strftime("%b"),
+            hours=float(month_hours)
+        ))
+        
+        # Move to next month
+        if current_month.month == 12:
+            current_month = current_month.replace(year=current_month.year + 1, month=1)
+        else:
+            current_month = current_month.replace(month=current_month.month + 1)
+    
+    if from_date.year == to_date.year:
+        period_label = from_date.strftime("%Y")
+    else:
+        period_label = f"{from_date.year} - {to_date.year}"
+    
+    return chart_data, ChartMetadata(
+        granularity="monthly",
+        period_label=period_label
+    )
+
+
+def generate_hours_chart(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None
+) -> Tuple[List[HoursChartDataPoint], ChartMetadata]:
+    """
+    Generate hours chart with dynamic granularity based on date range.
+    
+    Rules:
+    - 0-1 days: Hourly breakdown (24 data points)
+    - 2-10 days: Daily breakdown (one point per day)
+    - 11-45 days: Weekly breakdown (4-6 weeks)
+    - 46+ days: Monthly breakdown (up to 12 months)
+    """
+    days_diff = (to_date - from_date).days + 1
+    
+    if days_diff <= 1:
+        # Single day - show hourly
+        return generate_hourly_chart(db, from_date, user_id, client_id)
+    elif days_diff <= 10:
+        # Up to 10 days - show daily
+        return generate_daily_chart(db, from_date, to_date, user_id, client_id)
+    elif days_diff <= 45:
+        # Up to ~6 weeks - show weekly
+        return generate_weekly_chart(db, from_date, to_date, user_id, client_id)
+    else:
+        # More than 45 days - show monthly
+        return generate_monthly_chart(db, from_date, to_date, user_id, client_id)
 
 
 @router.get("/admin/stats", response_model=AdminDashboardStats)
@@ -101,7 +312,7 @@ def get_admin_stats(
         )
     
     # Apply filters - exclude admin users
-    base_query = base_query.join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE')
+    base_query = base_query.join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
     
     if client_id:
         base_query = base_query.filter(TaskEntry.client_id == client_id)
@@ -123,7 +334,7 @@ def get_admin_stats(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
         TaskEntry.status == TaskEntryStatus.APPROVED
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE')
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
     
     if client_id:
         total_hours_query = total_hours_query.filter(TaskEntry.client_id == client_id)
@@ -138,7 +349,7 @@ def get_admin_stats(
         TaskEntry.work_date <= to_date,
         TaskEntry.is_overtime == True,
         TaskEntry.status == TaskEntryStatus.APPROVED
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE')
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
     
     if client_id:
         total_overtime_query = total_overtime_query.filter(TaskEntry.client_id == client_id)
@@ -150,7 +361,7 @@ def get_admin_stats(
     # Active users count (employees only)
     active_users = db.query(func.count(User.id)).filter(
         User.is_active == True,
-        User.role == 'EMPLOYEE'
+        User.role == UserRole.EMPLOYEE
     ).scalar() or 0
     
     # Client counts by status
@@ -174,7 +385,7 @@ def get_admin_stats(
     today = date.today()
     entries_today = db.query(func.count(TaskEntry.id)).filter(
         TaskEntry.work_date == today
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE').scalar() or 0
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
     
     # This week
     week_start = today - timedelta(days=today.weekday())
@@ -182,7 +393,7 @@ def get_admin_stats(
     entries_this_week = db.query(func.count(TaskEntry.id)).filter(
         TaskEntry.work_date >= week_start,
         TaskEntry.work_date <= week_end
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE').scalar() or 0
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
     
     # This month
     month_start = today.replace(day=1)
@@ -194,7 +405,7 @@ def get_admin_stats(
     entries_this_month = db.query(func.count(TaskEntry.id)).filter(
         TaskEntry.work_date >= month_start,
         TaskEntry.work_date <= month_end
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE').scalar() or 0
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
     
     # Chart data - Status breakdown
     status_chart = [
@@ -203,27 +414,8 @@ def get_admin_stats(
         ChartDataPoint(name="Rejected", value=rejected_entries)
     ]
     
-    # Chart data - Daily hours for the date range (last 7 days max for readability)
-    daily_hours = []
-    chart_days = min((to_date - from_date).days + 1, 7)
-    for i in range(chart_days):
-        day = to_date - timedelta(days=chart_days - 1 - i)
-        day_hours_query = db.query(func.sum(TaskEntry.total_hours)).filter(
-            TaskEntry.work_date == day,
-            TaskEntry.status == TaskEntryStatus.APPROVED
-        ).join(User, TaskEntry.user_id == User.id).filter(User.role == 'EMPLOYEE')
-        
-        if client_id:
-            day_hours_query = day_hours_query.filter(TaskEntry.client_id == client_id)
-        if user_id:
-            day_hours_query = day_hours_query.filter(TaskEntry.user_id == user_id)
-        
-        hours = day_hours_query.scalar() or Decimal(0)
-        daily_hours.append(HoursChartDataPoint(
-            name=day.strftime('%a %m/%d'),
-            hours=float(hours)
-        ))
-    
+    # Chart data - Dynamic hours chart (hourly/daily/weekly/monthly based on date range)
+    daily_hours, chart_metadata = generate_hours_chart(db, from_date, to_date, user_id, client_id)
     # Chart data - Client breakdown (using LEFT JOIN to include entries without clients)
     client_query = db.query(
         func.coalesce(Client.name, 'No Client').label('client_name'),
@@ -235,7 +427,7 @@ def get_admin_stats(
     ).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
-        User.role == 'EMPLOYEE'
+        User.role == UserRole.EMPLOYEE
     )
     
     if client_id:
@@ -264,7 +456,7 @@ def get_admin_stats(
     ).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
-        User.role == 'EMPLOYEE'
+        User.role == UserRole.EMPLOYEE
     )
     
     if client_id:
@@ -299,6 +491,7 @@ def get_admin_stats(
         demo_clients_count=demo_clients_count,
         status_chart=status_chart,
         daily_hours_chart=daily_hours,
+        chart_metadata=chart_metadata,
         client_breakdown=client_breakdown,
         profitable_breakdown=profitable_breakdown
     )
@@ -377,6 +570,11 @@ def get_employee_stats(
         LeaveRequest.status == LeaveStatus.PENDING
     ).scalar() or 0
     
+    # Generate weekly hours chart (this week's daily data)
+    weekly_hours_chart, chart_metadata = generate_hours_chart(
+        db, week_start, week_end, current_user.id, None
+    )
+    
     return EmployeeDashboardStats(
         my_total_entries=my_total,
         my_approved_entries=my_approved,
@@ -386,5 +584,7 @@ def get_employee_stats(
         my_hours_this_week=hours_this_week,
         my_hours_this_month=hours_this_month,
         my_overtime_hours=my_overtime,
-        my_pending_leave_requests=pending_leaves
+        my_pending_leave_requests=pending_leaves,
+        weekly_hours_chart=weekly_hours_chart,
+        chart_metadata=chart_metadata
     )
