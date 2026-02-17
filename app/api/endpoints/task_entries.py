@@ -320,37 +320,30 @@ def create_task_entry(
         # Convert UUIDs to strings for database query (Client.id is String type)
         client_id_strs = {str(cid) for cid in client_ids}
         
-        # Query clients that are active AND have ACTIVE status
+        # Only restrict users from adding entries for clients with INACTIVE status
         from app.models.client import ClientStatus
-        active_clients = db.query(Client).filter(
+        all_clients = db.query(Client).filter(
             Client.id.in_(client_id_strs),
-            Client.is_active == True,
-            Client.status == ClientStatus.ACTIVE
+            Client.is_active == True
         ).all()
         
-        active_client_ids = {c.id for c in active_clients}
+        all_client_ids = {c.id for c in all_clients}
         
-        # Check for missing or inactive clients
-        missing_or_inactive = client_id_strs - active_client_ids
-        if missing_or_inactive:
-            # Check which ones exist but are not ACTIVE status
-            all_existing = db.query(Client).filter(
-                Client.id.in_(missing_or_inactive),
-                Client.is_active == True
-            ).all()
-            
-            inactive_status_clients = [c.name for c in all_existing if c.status != ClientStatus.ACTIVE]
-            
-            if inactive_status_clients:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Cannot add entries for clients with inactive status: {', '.join(inactive_status_clients)}. Please contact admin to activate these clients."
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Clients not found or have been removed: {', '.join(missing_or_inactive)}"
-                )
+        # Check for missing clients
+        missing_clients = client_id_strs - all_client_ids
+        if missing_clients:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Clients not found or have been removed: {', '.join(missing_clients)}"
+            )
+        
+        # Check for clients with INACTIVE status
+        inactive_status_clients = [c.name for c in all_clients if c.status == ClientStatus.INACTIVE]
+        if inactive_status_clients:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot add entries for inactive clients: {', '.join(inactive_status_clients)}. Please contact admin to activate these clients."
+            )
     
     # Check if task entry already exists for this date
     existing = db.query(TaskEntry).filter(
