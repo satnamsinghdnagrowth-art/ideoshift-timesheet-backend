@@ -243,9 +243,26 @@ def create_task_entry(
 ):
     """Create a new task entry with per-sub-task client tracking."""
     
-    # Helper function to check if a task is a leave task
+    # Helper functions to categorize task types
+    def get_task_master(task_master_id: str) -> Optional[TaskMaster]:
+        """Fetch task master from database."""
+        return db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
+    
+    def requires_hours_only(task_name: str) -> bool:
+        """Tasks that only require hours (no production)."""
+        task_lower = task_name.lower()
+        return any(keyword in task_lower for keyword in [
+            'celebration', 'leave', 'meeting', 'tech', 'technical issue', 'training'
+        ])
+    
+    def requires_production_only(task_name: str) -> bool:
+        """Tasks that only require production (no hours)."""
+        task_lower = task_name.lower()
+        return 'gp task' in task_lower
+    
     def is_leave_task(task_master_id: str) -> bool:
-        task_master = db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
+        """Check if task is a leave task (for client requirement logic)."""
+        task_master = get_task_master(task_master_id)
         if not task_master:
             return False
         
@@ -256,6 +273,43 @@ def create_task_entry(
         # Method 2: Check name for leave-related keywords (backup)
         task_name_lower = task_master.name.lower()
         return any(keyword in task_name_lower for keyword in ['leave', 'sick', 'vacation', 'absent', 'holiday', 'off day', 'time off'])
+    
+    # Validate sub-entries based on task type requirements
+    for sub in task_entry_create.sub_entries:
+        task_master = get_task_master(str(sub.task_master_id))
+        if not task_master:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Task master not found: {sub.task_master_id}"
+            )
+        
+        task_name = task_master.name
+        
+        # Validation: Hours-only tasks should not have production
+        if requires_hours_only(task_name):
+            if sub.hours <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Task '{task_name}' requires hours to be greater than 0"
+                )
+            if sub.production > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Task '{task_name}' does not require production value"
+                )
+        
+        # Validation: Production-only tasks should not require hours
+        elif requires_production_only(task_name):
+            if sub.production <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Task '{task_name}' requires production to be greater than 0"
+                )
+            if sub.hours > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Task '{task_name}' does not require hours value"
+                )
     
     # Validate all NON-LEAVE clients in sub-entries exist, are active, and have ACTIVE status
     client_ids = {
@@ -438,6 +492,19 @@ def update_task_entry(
     
     # Update sub-entries if provided
     if task_entry_update.sub_entries is not None:
+        # Helper functions for validation
+        def requires_hours_only(task_name: str) -> bool:
+            """Tasks that only require hours (no production)."""
+            task_lower = task_name.lower()
+            return any(keyword in task_lower for keyword in [
+                'celebration', 'leave', 'meeting', 'tech', 'technical issue', 'training'
+            ])
+        
+        def requires_production_only(task_name: str) -> bool:
+            """Tasks that only require production (no hours)."""
+            task_lower = task_name.lower()
+            return 'gp task' in task_lower
+        
         # Delete existing sub-entries
         db.query(TaskSubEntry).filter(TaskSubEntry.task_entry_id == task_entry.id).delete()
         
@@ -451,6 +518,34 @@ def update_task_entry(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Task master not found: {sub_data.task_master_id}"
                 )
+            
+            task_name = task_master.name
+            
+            # Validation: Hours-only tasks should not have production
+            if requires_hours_only(task_name):
+                if sub_data.hours <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' requires hours to be greater than 0"
+                    )
+                if sub_data.production > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' does not require production value"
+                    )
+            
+            # Validation: Production-only tasks should not require hours
+            elif requires_production_only(task_name):
+                if sub_data.production <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' requires production to be greater than 0"
+                    )
+                if sub_data.hours > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' does not require hours value"
+                    )
             
             # Auto-set productive based on task master's is_profitable
             sub_entry = TaskSubEntry(
@@ -601,6 +696,19 @@ def admin_update_task_entry(
     
     # Update sub-entries if provided
     if task_entry_update.sub_entries is not None:
+        # Helper functions for validation
+        def requires_hours_only(task_name: str) -> bool:
+            """Tasks that only require hours (no production)."""
+            task_lower = task_name.lower()
+            return any(keyword in task_lower for keyword in [
+                'celebration', 'leave', 'meeting', 'tech', 'technical issue', 'training'
+            ])
+        
+        def requires_production_only(task_name: str) -> bool:
+            """Tasks that only require production (no hours)."""
+            task_lower = task_name.lower()
+            return 'gp task' in task_lower
+        
         # Delete old sub-entries
         for sub in task_entry.sub_entries:
             db.delete(sub)
@@ -618,6 +726,34 @@ def admin_update_task_entry(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Task master not found: {sub_data.task_master_id}"
                 )
+            
+            task_name = task_master.name
+            
+            # Validation: Hours-only tasks should not have production
+            if requires_hours_only(task_name):
+                if sub_data.hours <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' requires hours to be greater than 0"
+                    )
+                if sub_data.production > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' does not require production value"
+                    )
+            
+            # Validation: Production-only tasks should not require hours
+            elif requires_production_only(task_name):
+                if sub_data.production <= 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' requires production to be greater than 0"
+                    )
+                if sub_data.hours > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Task '{task_name}' does not require hours value"
+                    )
             
             sub_entry = TaskSubEntry(
                 id=str(uuid.uuid4()),
