@@ -34,22 +34,13 @@ def get_timesheet_report(
 ):
     """Get timesheet report (admin only) with multi-select filters."""
     # Handle date_range filter
-    if date_range == "custom":
-        # For custom range, from_date and to_date must be provided
-        if not from_date or not to_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="When date_range is 'custom', both from_date and to_date must be provided"
-            )
-    else:
-        # Use predefined date ranges
-        if date_range:
+    if not from_date or not to_date:
+        # If dates not provided, use date_range (but skip "custom")
+        if date_range and date_range != "custom":
             from_date, to_date = get_date_range(date_range)
-        elif not from_date or not to_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Either provide from_date and to_date, or date_range"
-            )
+        else:
+            # Default to current month if no parameters provided or date_range is "custom"
+            from_date, to_date = get_date_range("this_month")
     
     query = db.query(
         TaskEntry.work_date,
@@ -275,21 +266,13 @@ async def export_to_excel(
         )
     
     # Handle date_range filter with default
-    if date_range == "custom":
-        # For custom range, from_date and to_date must be provided
-        if not from_date or not to_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="When date_range is 'custom', both from_date and to_date must be provided"
-            )
-    else:
-        # Use predefined date ranges if from_date and to_date are not provided
-        if not from_date or not to_date:
-            if date_range:
-                from_date, to_date = get_date_range(date_range)
-            else:
-                # Default to current month if no parameters provided
-                from_date, to_date = get_date_range("this_month")
+    if not from_date or not to_date:
+        # If dates not provided, use date_range (but skip "custom")
+        if date_range and date_range != "custom":
+            from_date, to_date = get_date_range(date_range)
+        elif not date_range or date_range == "custom":
+            # Default to current month if no parameters provided or date_range is "custom"
+            from_date, to_date = get_date_range("this_month")
     
     # Query task entries with sub-entries grouped by client (using TaskSubEntry.client_id)
     query = db.query(
@@ -611,19 +594,12 @@ async def export_my_report_to_excel(
         )
     
     # Handle date_range filter
-    if date_range == "custom":
-        # For custom range, from_date and to_date must be provided
-        if not from_date or not to_date:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="When date_range is 'custom', both from_date and to_date must be provided"
-            )
-    else:
-        # Use predefined date ranges
-        if date_range:
+    if not from_date or not to_date:
+        # If dates not provided, use date_range (but skip "custom")
+        if date_range and date_range != "custom":
             from_date, to_date = get_date_range(date_range)
-        elif not from_date:
-            # Default to current month if no dates specified
+        elif not date_range or date_range == "custom":
+            # Default to current month if no parameters provided or date_range is "custom"
             from_date, to_date = get_date_range("this_month")
     
     # Query for user's data (using TaskSubEntry.client_id)
