@@ -34,13 +34,22 @@ def get_timesheet_report(
 ):
     """Get timesheet report (admin only) with multi-select filters."""
     # Handle date_range filter
-    if date_range:
-        from_date, to_date = get_date_range(date_range)
-    elif not from_date or not to_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either provide from_date and to_date, or date_range"
-        )
+    if date_range == "custom":
+        # For custom range, from_date and to_date must be provided
+        if not from_date or not to_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="When date_range is 'custom', both from_date and to_date must be provided"
+            )
+    else:
+        # Use predefined date ranges
+        if date_range:
+            from_date, to_date = get_date_range(date_range)
+        elif not from_date or not to_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either provide from_date and to_date, or date_range"
+            )
     
     query = db.query(
         TaskEntry.work_date,
