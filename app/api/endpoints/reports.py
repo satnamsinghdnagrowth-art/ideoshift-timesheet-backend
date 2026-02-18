@@ -225,18 +225,18 @@ def get_attendance_report(
         # Non-working day: Sunday, defined holiday, or non-working Saturday
         if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
             holiday_label = holiday_map.get(current_date)
-            if not holiday_label:
-                holiday_label = "Sunday" if is_sunday else "Saturday"
+            # if not holiday_label:
+            #     holiday_label = "Sunday" if is_sunday else "Saturday"
 
-            for user in users:
-                report_items.append(AttendanceReportItem(
-                    date=current_date,
-                    employee_name=user.name,
-                    employee_email=user.email,
-                    attendance_status="HOLIDAY",
-                    is_holiday=True,
-                    holiday_name=holiday_label,
-                ))
+            # for user in users:
+            #     report_items.append(AttendanceReportItem(
+            #         date=current_date,
+            #         employee_name=user.name,
+            #         employee_email=user.email,
+            #         attendance_status="HOLIDAY",
+            #         is_holiday=True,
+            #         holiday_name=holiday_label,
+            #     ))
         else:
             # Working day — determine per-employee status
             for user in users:
@@ -448,12 +448,12 @@ async def export_attendance_to_excel(
 
         if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
             holiday_label = holiday_map.get(current_date) or ("Sunday" if is_sunday else "Saturday")
-            for user in users:
-                rows.append({
-                    'date': str(current_date), 'employee': user.name,
-                    'status': 'HOLIDAY', 'holiday_name': holiday_label,
-                    'production': None, 'clients': None,
-                })
+            # for user in users:
+            #     rows.append({
+            #         'date': str(current_date), 'employee': user.name,
+            #         'status': 'HOLIDAY', 'holiday_name': holiday_label,
+            #         'production': None, 'clients': None,
+            #     })
         else:
             for user in users:
                 uid = str(user.id)
@@ -716,6 +716,129 @@ async def export_to_excel(
     excel_file.seek(0)
 
     filename = f"timesheet_report_{from_date}_{to_date}.xlsx"
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/export/leave-excel")
+async def export_leave_to_excel(
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    date_range: Optional[str] = Query(None),
+    user_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin)
+):
+    """Export leave report to Excel (admin only)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="openpyxl library is not installed"
+        )
+
+    # Handle date range
+    if not from_date or not to_date:
+        if date_range and date_range != "custom":
+            from_date, to_date = get_date_range(date_range)
+        else:
+            from_date, to_date = get_date_range("this_month")
+
+    query = db.query(
+        LeaveRequest.from_date,
+        LeaveRequest.to_date,
+        User.name,
+        User.email,
+        LeaveRequest.reason,
+        LeaveRequest.status,
+        LeaveRequest.admin_comment
+    ).join(User, LeaveRequest.user_id == User.id).filter(
+        LeaveRequest.from_date <= to_date,
+        LeaveRequest.to_date >= from_date,
+        User.role == 'EMPLOYEE',
+    )
+
+    if user_ids:
+        user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
+        if user_id_list:
+            query = query.filter(LeaveRequest.user_id.in_(user_id_list))
+
+    results = query.order_by(LeaveRequest.from_date.desc()).all()
+
+    # ── Excel workbook ──────────────────────────────────────────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Leave Report"
+
+    title_fill  = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    title_font  = Font(color="FFFFFF", bold=True, size=14)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    center      = Alignment(horizontal="center", vertical="center")
+    border      = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'),  bottom=Side(style='thin'),
+    )
+    approved_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    rejected_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    pending_fill  = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+    NUM_COLS = 6
+    row_num = 1
+
+    # Title row
+    ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+    tc = ws.cell(row=row_num, column=1, value=f"Leave Report: {from_date} to {to_date}")
+    tc.fill, tc.font, tc.alignment = title_fill, title_font, center
+    row_num += 2
+
+    # Header row
+    headers = ["Employee", "From", "To", "Reason", "Status", "Admin Comment"]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=row_num, column=col, value=header)
+        cell.fill, cell.font, cell.alignment, cell.border = header_fill, header_font, center, border
+    row_num += 1
+
+    if not results:
+        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+        nd = ws.cell(row=row_num, column=1, value="No leave data found for the selected date range and filters")
+        nd.alignment = center
+        nd.font = Font(italic=True, size=12)
+    else:
+        for row in results:
+            status_val = str(row[5].value if hasattr(row[5], 'value') else row[5])
+            row_fill = (
+                approved_fill if status_val == 'APPROVED' else
+                rejected_fill if status_val == 'REJECTED' else
+                pending_fill
+            )
+            cells = [
+                ws.cell(row=row_num, column=1, value=row[2]),
+                ws.cell(row=row_num, column=2, value=str(row[0])),
+                ws.cell(row=row_num, column=3, value=str(row[1])),
+                ws.cell(row=row_num, column=4, value=row[4]),
+                ws.cell(row=row_num, column=5, value=status_val),
+                ws.cell(row=row_num, column=6, value=row[6] or ''),
+            ]
+            for cell in cells:
+                cell.fill = row_fill
+                cell.border = border
+            row_num += 1
+
+    # Column widths
+    for col, width in zip("ABCDEF", [22, 14, 14, 35, 14, 30]):
+        ws.column_dimensions[col].width = width
+
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+
+    filename = f"leave_report_{from_date}_{to_date}.xlsx"
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
