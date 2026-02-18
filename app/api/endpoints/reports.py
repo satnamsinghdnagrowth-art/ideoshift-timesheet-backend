@@ -13,14 +13,16 @@ from app.models.task_entry import TaskEntry, TaskEntryStatus, TaskSubEntry
 from app.models.leave_request import LeaveRequest, LeaveStatus
 from app.models.client import Client
 from app.models.task_master import TaskMaster
-from app.schemas import TimesheetReportItem, AttendanceReportItem, LeaveReportItem
+from app.models.holiday import Holiday
+from app.models.working_saturday import WorkingSaturday
+from app.schemas import TimesheetReportItem, AttendanceReportItem, LeaveReportItem, ProductionReportItem
 from app.api.dependencies import require_admin, get_current_user
 from app.core.date_filters import get_date_range
 
 router = APIRouter(prefix="/admin/reports", tags=["Admin - Reports"])
 
 
-@router.get("/timesheet", response_model=List[TimesheetReportItem])
+@router.get("/timesheet", response_model=List[ProductionReportItem])
 def get_timesheet_report(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
@@ -32,71 +34,68 @@ def get_timesheet_report(
     db: Session = Depends(get_db),
     _: User = Depends(require_admin)
 ):
-    """Get timesheet report (admin only) with multi-select filters."""
+    """Get client-wise production report (admin only) grouped by client, employee, task."""
     # Handle date_range filter
     if not from_date or not to_date:
-        # If dates not provided, use date_range (but skip "custom")
         if date_range and date_range != "custom":
             from_date, to_date = get_date_range(date_range)
         else:
-            # Default to current month if no parameters provided or date_range is "custom"
             from_date, to_date = get_date_range("this_month")
-    
+
     query = db.query(
-        TaskEntry.work_date,
-        User.name,
-        User.email,
         func.coalesce(Client.name, 'No Client').label('client_name'),
-        TaskEntry.task_name,
-        TaskEntry.total_hours,
-        TaskEntry.status,
-        TaskEntry.admin_comment
-    ).join(User, TaskEntry.user_id == User.id).outerjoin(
-        Client,
-        TaskEntry.client_id == Client.id  # LEFT JOIN to include entries without client
+        User.name.label('employee_name'),
+        TaskMaster.name.label('task_name'),
+        func.sum(TaskSubEntry.production).label('total_production'),
+        func.sum(TaskSubEntry.hours).label('total_hours'),
+    ).join(
+        TaskEntry, TaskSubEntry.task_entry_id == TaskEntry.id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id
+    ).join(
+        TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
+    ).join(
+        User, TaskEntry.user_id == User.id
+    ).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        User.role == 'EMPLOYEE',
     )
-    
-    # Apply filters
-    query = query.filter(TaskEntry.work_date >= from_date, TaskEntry.work_date <= to_date)
-    
-    # Filter out admin users - only show employee records
-    query = query.filter(User.role == 'EMPLOYEE')
-    
+
     # Multi-select filters
     if user_ids:
         user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
         if user_id_list:
             query = query.filter(TaskEntry.user_id.in_(user_id_list))
-    
+
     if client_ids:
         client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
-            query = query.filter(TaskEntry.client_id.in_(client_id_list))
-    
+            query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
+
     if task_master_ids:
         task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
-            query = query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
-    
+
     if is_profitable is not None:
-        if not task_master_ids:  # Only join if not already joined above
-            query = query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
-        query = query.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id)
         query = query.filter(TaskMaster.is_profitable == is_profitable)
-    
-    results = query.order_by(TaskEntry.work_date.desc()).all()
-    
+
+    query = query.group_by(
+        Client.name, User.name, TaskMaster.name
+    ).order_by(Client.name, User.name, TaskMaster.name)
+
+    results = query.all()
+
     return [
-        TimesheetReportItem(
-            date=row[0],
-            employee_name=row[1],
-            employee_email=row[2],
-            client_name=row[3],
-            task_name=row[4],
-            total_hours=row[5],
-            status=row[6],
-            admin_comment=row[7]
+        ProductionReportItem(
+            client_name=row.client_name,
+            employee_name=row.employee_name,
+            task_name=row.task_name,
+            production=float(row.total_production or 0),
+            hours=float(row.total_hours or 0),
+            efficiency=round(float(row.total_production or 0) / float(row.total_hours) if row.total_hours else 0, 2),
         )
         for row in results
     ]
@@ -107,13 +106,12 @@ def get_attendance_report(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     date_range: Optional[str] = Query(None),
-    user_id: Optional[UUID] = Query(None),
+    user_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
     is_profitable: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     _: User = Depends(require_admin)
 ):
-    """Get attendance report with derived status (admin only)."""
-    # Handle date_range filter
+    """Get attendance report with holiday awareness and per-employee production data (admin only)."""
     if date_range:
         from_date, to_date = get_date_range(date_range)
     elif not from_date or not to_date:
@@ -121,67 +119,166 @@ def get_attendance_report(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either provide from_date and to_date, or date_range"
         )
-    # Get all users or specific user - filter out admins
+
+    # ── Load employees ────────────────────────────────────────────────────
     user_query = db.query(User).filter(User.is_active == True, User.role == 'EMPLOYEE')
-    if user_id:
-        user_query = user_query.filter(User.id == user_id)
-    
-    users = user_query.all()
-    
+    if user_ids:
+        uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
+        if uid_list:
+            user_query = user_query.filter(User.id.in_(uid_list))
+    users = user_query.order_by(User.name).all()
+    user_id_strs = [str(u.id) for u in users]
+
+    # ── Pre-load reference data (bulk, no N+1 queries) ───────────────────
+
+    # Holidays in range: {holiday_date: holiday_name}
+    holiday_map: dict = {
+        row.holiday_date: row.name
+        for row in db.query(Holiday.holiday_date, Holiday.name).filter(
+            Holiday.holiday_date >= from_date,
+            Holiday.holiday_date <= to_date
+        ).all()
+    }
+
+    # Working Saturdays in range: {work_date}
+    working_saturday_set: set = {
+        row.work_date
+        for row in db.query(WorkingSaturday.work_date).filter(
+            WorkingSaturday.work_date >= from_date,
+            WorkingSaturday.work_date <= to_date
+        ).all()
+    }
+
+    # Approved leaves: set of (user_id_str, leave_date)
+    leave_date_set: set = set()
+    for lr in db.query(LeaveRequest.user_id, LeaveRequest.from_date, LeaveRequest.to_date).filter(
+        LeaveRequest.status == LeaveStatus.APPROVED,
+        LeaveRequest.from_date <= to_date,
+        LeaveRequest.to_date >= from_date,
+        LeaveRequest.user_id.in_(user_id_strs)
+    ).all():
+        d = lr.from_date
+        while d <= lr.to_date:
+            if from_date <= d <= to_date:
+                leave_date_set.add((str(lr.user_id), d))
+            d += timedelta(days=1)
+
+    # Task entry statuses: {(user_id_str, work_date): highest_priority_status}
+    STATUS_PRIORITY = {
+        TaskEntryStatus.APPROVED: 4,
+        TaskEntryStatus.PENDING: 3,
+        TaskEntryStatus.DRAFT: 2,
+        TaskEntryStatus.REJECTED: 1,
+    }
+    entry_map: dict = {}
+    for er in db.query(TaskEntry.user_id, TaskEntry.work_date, TaskEntry.status).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.user_id.in_(user_id_strs)
+    ).all():
+        key = (str(er.user_id), er.work_date)
+        if key not in entry_map or STATUS_PRIORITY.get(er.status, 0) > STATUS_PRIORITY.get(entry_map[key], 0):
+            entry_map[key] = er.status
+
+    # Production data for APPROVED entries: {(user_id_str, work_date): {production, clients[]}}
+    from collections import defaultdict
+    prod_map: dict = defaultdict(lambda: {'production': 0.0, 'clients': []})
+
+    prod_q = db.query(
+        TaskEntry.user_id,
+        TaskEntry.work_date,
+        func.coalesce(Client.name, 'No Client').label('client_name'),
+        func.sum(TaskSubEntry.production).label('total_production'),
+    ).join(
+        TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id
+    ).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        TaskEntry.user_id.in_(user_id_strs),
+    )
+    if is_profitable is not None:
+        prod_q = prod_q.join(
+            TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
+        ).filter(TaskMaster.is_profitable == is_profitable)
+    prod_q = prod_q.group_by(TaskEntry.user_id, TaskEntry.work_date, Client.name)
+
+    for pr in prod_q.all():
+        key = (str(pr.user_id), pr.work_date)
+        prod_map[key]['production'] += float(pr.total_production or 0)
+        if pr.client_name and pr.client_name not in prod_map[key]['clients']:
+            prod_map[key]['clients'].append(pr.client_name)
+
+    # ── Build report ─────────────────────────────────────────────────────
     report_items = []
     current_date = from_date
-    
+
     while current_date <= to_date:
-        for user in users:
-            # Check for approved leave
-            leave = db.query(LeaveRequest).filter(
-                LeaveRequest.user_id == user.id,
-                LeaveRequest.status == LeaveStatus.APPROVED,
-                LeaveRequest.from_date <= current_date,
-                LeaveRequest.to_date >= current_date
-            ).first()
-            
-            if leave:
-                attendance_status = "LEAVE"
-            else:
-                # Check for task entry
-                task_entry_query = db.query(TaskEntry).filter(
-                    TaskEntry.user_id == user.id,
-                    TaskEntry.work_date == current_date
-                )
-                
-                # Apply is_profitable filter if provided
-                if is_profitable is not None:
-                    task_entry_query = task_entry_query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
-                    task_entry_query = task_entry_query.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id)
-                    task_entry_query = task_entry_query.filter(TaskMaster.is_profitable == is_profitable)
-                
-                task_entry = task_entry_query.first()
-                
-                if task_entry:
-                    if task_entry.status == TaskEntryStatus.APPROVED:
-                        attendance_status = "PRESENT"
-                    elif task_entry.status == TaskEntryStatus.PENDING:
-                        attendance_status = "PENDING"
-                    elif task_entry.status == TaskEntryStatus.DRAFT:
-                        attendance_status = "PENDING"
-                    else:  # REJECTED
-                        attendance_status = "ABSENT"
-                else:
-                    # No task entry and no leave
-                    attendance_status = "ABSENT"
-            
-            report_items.append(
-                AttendanceReportItem(
+        weekday = current_date.weekday()  # 0=Mon … 6=Sun
+        is_sunday = weekday == 6
+        is_saturday = weekday == 5
+        is_working_saturday = current_date in working_saturday_set
+        in_holiday_map = current_date in holiday_map
+
+        # Non-working day: Sunday, defined holiday, or non-working Saturday
+        if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
+            holiday_label = holiday_map.get(current_date)
+            if not holiday_label:
+                holiday_label = "Sunday" if is_sunday else "Saturday"
+
+            for user in users:
+                report_items.append(AttendanceReportItem(
                     date=current_date,
                     employee_name=user.name,
                     employee_email=user.email,
-                    attendance_status=attendance_status
-                )
-            )
-        
+                    attendance_status="HOLIDAY",
+                    is_holiday=True,
+                    holiday_name=holiday_label,
+                ))
+        else:
+            # Working day — determine per-employee status
+            for user in users:
+                uid = str(user.id)
+                entry_key = (uid, current_date)
+
+                if entry_key in leave_date_set:
+                    attendance_status = "LEAVE"
+                    production = None
+                    client_names_str = None
+                elif entry_key in entry_map:
+                    es = entry_map[entry_key]
+                    if es == TaskEntryStatus.APPROVED:
+                        attendance_status = "PRESENT"
+                        pd = prod_map.get(entry_key)
+                        production = round(pd['production'], 2) if pd else 0.0
+                        client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
+                    elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
+                        attendance_status = "PENDING"
+                        production = None
+                        client_names_str = None
+                    else:
+                        attendance_status = "ABSENT"
+                        production = None
+                        client_names_str = None
+                else:
+                    attendance_status = "ABSENT"
+                    production = None
+                    client_names_str = None
+
+                report_items.append(AttendanceReportItem(
+                    date=current_date,
+                    employee_name=user.name,
+                    employee_email=user.email,
+                    attendance_status=attendance_status,
+                    is_holiday=False,
+                    production=production,
+                    client_names=client_names_str,
+                ))
+
         current_date += timedelta(days=1)
-    
+
     return report_items
 
 
@@ -243,19 +340,17 @@ def get_leave_report(
     ]
 
 
-@router.get("/export/excel")
-async def export_to_excel(
+@router.get("/export/attendance-excel")
+async def export_attendance_to_excel(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
-    date_range: Optional[str] = Query("this_month"),  # Default to current month
-    client_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
-    user_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
-    task_master_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    date_range: Optional[str] = Query("current_week"),
+    user_ids: Optional[str] = Query(None),
     is_profitable: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Export productivity report to Excel with client-wise breakdown and multi-select filters (admin only)."""
+    """Export attendance report (with holiday awareness and production) to Excel (admin only)."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -264,26 +359,240 @@ async def export_to_excel(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="openpyxl library is not installed"
         )
-    
-    # Handle date_range filter with default
+
+    # Resolve dates
+    if date_range and date_range != "custom":
+        from_date, to_date = get_date_range(date_range)
+    elif not from_date or not to_date:
+        from_date, to_date = get_date_range("current_week")
+
+    # Reuse the same report-building logic by calling the endpoint function directly
+    # Build report data inline (same logic as get_attendance_report)
+    user_query = db.query(User).filter(User.is_active == True, User.role == 'EMPLOYEE')
+    if user_ids:
+        uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
+        if uid_list:
+            user_query = user_query.filter(User.id.in_(uid_list))
+    users = user_query.order_by(User.name).all()
+    user_id_strs = [str(u.id) for u in users]
+
+    holiday_map = {
+        row.holiday_date: row.name
+        for row in db.query(Holiday.holiday_date, Holiday.name).filter(
+            Holiday.holiday_date >= from_date, Holiday.holiday_date <= to_date
+        ).all()
+    }
+    working_saturday_set = {
+        row.work_date
+        for row in db.query(WorkingSaturday.work_date).filter(
+            WorkingSaturday.work_date >= from_date, WorkingSaturday.work_date <= to_date
+        ).all()
+    }
+    leave_date_set: set = set()
+    for lr in db.query(LeaveRequest.user_id, LeaveRequest.from_date, LeaveRequest.to_date).filter(
+        LeaveRequest.status == LeaveStatus.APPROVED,
+        LeaveRequest.from_date <= to_date,
+        LeaveRequest.to_date >= from_date,
+        LeaveRequest.user_id.in_(user_id_strs)
+    ).all():
+        d = lr.from_date
+        while d <= lr.to_date:
+            if from_date <= d <= to_date:
+                leave_date_set.add((str(lr.user_id), d))
+            d += timedelta(days=1)
+
+    STATUS_PRIORITY = {
+        TaskEntryStatus.APPROVED: 4, TaskEntryStatus.PENDING: 3,
+        TaskEntryStatus.DRAFT: 2, TaskEntryStatus.REJECTED: 1,
+    }
+    entry_map: dict = {}
+    for er in db.query(TaskEntry.user_id, TaskEntry.work_date, TaskEntry.status).filter(
+        TaskEntry.work_date >= from_date, TaskEntry.work_date <= to_date,
+        TaskEntry.user_id.in_(user_id_strs)
+    ).all():
+        key = (str(er.user_id), er.work_date)
+        if key not in entry_map or STATUS_PRIORITY.get(er.status, 0) > STATUS_PRIORITY.get(entry_map[key], 0):
+            entry_map[key] = er.status
+
+    from collections import defaultdict
+    prod_map: dict = defaultdict(lambda: {'production': 0.0, 'clients': []})
+    prod_q = db.query(
+        TaskEntry.user_id, TaskEntry.work_date,
+        func.coalesce(Client.name, 'No Client').label('client_name'),
+        func.sum(TaskSubEntry.production).label('total_production'),
+    ).join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+    ).outerjoin(Client, TaskSubEntry.client_id == Client.id
+    ).filter(
+        TaskEntry.work_date >= from_date, TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED, TaskEntry.user_id.in_(user_id_strs),
+    )
+    if is_profitable is not None:
+        prod_q = prod_q.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
+        ).filter(TaskMaster.is_profitable == is_profitable)
+    prod_q = prod_q.group_by(TaskEntry.user_id, TaskEntry.work_date, Client.name)
+    for pr in prod_q.all():
+        key = (str(pr.user_id), pr.work_date)
+        prod_map[key]['production'] += float(pr.total_production or 0)
+        if pr.client_name and pr.client_name not in prod_map[key]['clients']:
+            prod_map[key]['clients'].append(pr.client_name)
+
+    # Build rows
+    rows = []
+    current_date = from_date
+    while current_date <= to_date:
+        weekday = current_date.weekday()
+        is_sunday = weekday == 6
+        is_saturday = weekday == 5
+        is_working_saturday = current_date in working_saturday_set
+        in_holiday_map = current_date in holiday_map
+
+        if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
+            holiday_label = holiday_map.get(current_date) or ("Sunday" if is_sunday else "Saturday")
+            for user in users:
+                rows.append({
+                    'date': str(current_date), 'employee': user.name,
+                    'status': 'HOLIDAY', 'holiday_name': holiday_label,
+                    'production': None, 'clients': None,
+                })
+        else:
+            for user in users:
+                uid = str(user.id)
+                entry_key = (uid, current_date)
+                if entry_key in leave_date_set:
+                    rows.append({'date': str(current_date), 'employee': user.name,
+                                 'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
+                elif entry_key in entry_map:
+                    es = entry_map[entry_key]
+                    if es == TaskEntryStatus.APPROVED:
+                        pd = prod_map.get(entry_key)
+                        rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
+                                     'holiday_name': None,
+                                     'production': round(pd['production'], 2) if pd else 0.0,
+                                     'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
+                    elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
+                        rows.append({'date': str(current_date), 'employee': user.name,
+                                     'status': 'PENDING', 'holiday_name': None, 'production': None, 'clients': None})
+                    else:
+                        rows.append({'date': str(current_date), 'employee': user.name,
+                                     'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
+                else:
+                    rows.append({'date': str(current_date), 'employee': user.name,
+                                 'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
+        current_date += timedelta(days=1)
+
+    # ── Excel workbook ────────────────────────────────────────────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Attendance Report"
+
+    title_fill  = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    title_font  = Font(color="FFFFFF", bold=True, size=14)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    center      = Alignment(horizontal="center", vertical="center")
+    border      = Border(left=Side(style='thin'), right=Side(style='thin'),
+                         top=Side(style='thin'),  bottom=Side(style='thin'))
+
+    STATUS_FILL = {
+        'PRESENT': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+        'ABSENT':  PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+        'LEAVE':   PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+        'PENDING': PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"),
+        'HOLIDAY': PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid"),
+    }
+
+    NUM_COLS = 5
+    row_num = 1
+
+    ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+    tc = ws.cell(row=row_num, column=1, value=f"Attendance Report: {from_date} to {to_date}")
+    tc.fill, tc.font, tc.alignment = title_fill, title_font, center
+    row_num += 2
+
+    for col, header in enumerate(["Date", "Employee", "Status", "Production", "Client(s)"], 1):
+        cell = ws.cell(row=row_num, column=col, value=header)
+        cell.fill, cell.font, cell.alignment, cell.border = header_fill, header_font, center, border
+    row_num += 1
+
+    if not rows:
+        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+        nd = ws.cell(row=row_num, column=1, value="No data found for the selected filters")
+        nd.alignment, nd.font = center, Font(italic=True, size=12)
+    else:
+        for r in rows:
+            row_fill = STATUS_FILL.get(r['status'])
+            status_display = r['status']
+            if r['status'] == 'HOLIDAY' and r.get('holiday_name'):
+                status_display = f"HOLIDAY – {r['holiday_name']}"
+
+            values = [r['date'], r['employee'], status_display,
+                      r['production'] if r['production'] is not None else '',
+                      r['clients'] or '']
+            for col, val in enumerate(values, 1):
+                cell = ws.cell(row=row_num, column=col, value=val)
+                cell.border = border
+                if row_fill:
+                    cell.fill = row_fill
+            row_num += 1
+
+    ws.column_dimensions['A'].width = 14
+    ws.column_dimensions['B'].width = 22
+    ws.column_dimensions['C'].width = 24
+    ws.column_dimensions['D'].width = 14
+    ws.column_dimensions['E'].width = 28
+
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+
+    filename = f"attendance_report_{from_date}_{to_date}.xlsx"
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/export/excel")
+async def export_to_excel(
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    date_range: Optional[str] = Query("this_month"),
+    client_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    user_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    task_master_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    is_profitable: Optional[bool] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Export client-wise production report to Excel (admin only)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="openpyxl library is not installed"
+        )
+
+    # Handle date_range filter
     if not from_date or not to_date:
-        # If dates not provided, use date_range (but skip "custom")
         if date_range and date_range != "custom":
             from_date, to_date = get_date_range(date_range)
-        elif not date_range or date_range == "custom":
-            # Default to current month if no parameters provided or date_range is "custom"
+        else:
             from_date, to_date = get_date_range("this_month")
-    
-    # Query task entries with sub-entries grouped by client (using TaskSubEntry.client_id)
+
+    # Query sub-entry level data grouped by client + employee + task
     query = db.query(
         func.coalesce(Client.name, 'No Client').label('client_name'),
+        User.name.label('employee_name'),
         TaskMaster.name.label('task_name'),
         func.sum(TaskSubEntry.production).label('total_production'),
-        func.sum(TaskSubEntry.hours).label('total_hours')
+        func.sum(TaskSubEntry.hours).label('total_hours'),
     ).join(
         TaskEntry, TaskSubEntry.task_entry_id == TaskEntry.id
     ).outerjoin(
-        Client, TaskSubEntry.client_id == Client.id  # Use TaskSubEntry.client_id with LEFT JOIN
+        Client, TaskSubEntry.client_id == Client.id
     ).join(
         TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
     ).join(
@@ -292,201 +601,121 @@ async def export_to_excel(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
         TaskEntry.status == TaskEntryStatus.APPROVED,
-        User.role == 'EMPLOYEE'  # Filter out admin users
+        User.role == 'EMPLOYEE',
     )
-    
-    # Multi-select filters
+
     if client_ids:
         client_id_list = [cid.strip() for cid in client_ids.split(',') if cid.strip()]
         if client_id_list:
             query = query.filter(TaskSubEntry.client_id.in_(client_id_list))
-    
+
     if user_ids:
         user_id_list = [uid.strip() for uid in user_ids.split(',') if uid.strip()]
         if user_id_list:
             query = query.filter(TaskEntry.user_id.in_(user_id_list))
-    
+
     if task_master_ids:
         task_master_id_list = [tmid.strip() for tmid in task_master_ids.split(',') if tmid.strip()]
         if task_master_id_list:
             query = query.filter(TaskSubEntry.task_master_id.in_(task_master_id_list))
-    
+
     if is_profitable is not None:
         query = query.filter(TaskMaster.is_profitable == is_profitable)
-    
-    query = query.group_by(Client.name, TaskMaster.name).order_by(Client.name, TaskMaster.name)
-    
+
+    query = query.group_by(
+        Client.name, User.name, TaskMaster.name
+    ).order_by(Client.name, User.name, TaskMaster.name)
+
     results = query.all()
-    
-    # Group by client
-    from collections import defaultdict
-    client_data = defaultdict(list)
+
+    # Build flat row list
+    rows = []
     for row in results:
-        client_data[row.client_name].append({
+        prod = float(row.total_production or 0)
+        hrs = float(row.total_hours or 0)
+        efficiency = round(prod / hrs, 2) if hrs > 0 else 0
+        rows.append({
+            'client_name': row.client_name,
+            'employee_name': row.employee_name,
             'task_name': row.task_name,
-            'production': float(row.total_production or 0),
-            'hours': float(row.total_hours or 0)
+            'production': prod,
+            'hours': hrs,
+            'efficiency': efficiency,
         })
-    
-    # Create Excel workbook
+
+    # ── Excel workbook ──────────────────────────────────────────────────
     wb = Workbook()
     ws = wb.active
-    ws.title = "Productivity Report"
-    
-    # Styling
-    title_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-    title_font = Font(color="FFFFFF", bold=True, size=14)
-    
-    client_header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-    client_header_font = Font(color="FFFFFF", bold=True, size=12)
-    
-    column_header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    column_header_font = Font(color="FFFFFF", bold=True)
-    header_alignment = Alignment(horizontal="center", vertical="center")
-    
-    border_style = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
+    ws.title = "Timesheet Report"
+
+    # Styles
+    title_fill   = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    title_font   = Font(color="FFFFFF", bold=True, size=14)
+    header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font  = Font(color="FFFFFF", bold=True)
+    total_fill   = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+    total_font   = Font(bold=True, size=12)
+    center       = Alignment(horizontal="center", vertical="center")
+    border       = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'),  bottom=Side(style='thin'),
     )
-    
+
+    NUM_COLS = 6
     row_num = 1
-    
-    # Add title row
-    ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=4)
-    title_cell = ws.cell(row=row_num, column=1, value=f"Productivity Report: {from_date} to {to_date}")
-    title_cell.fill = title_fill
-    title_cell.font = title_font
-    title_cell.alignment = header_alignment
+
+    # Title row
+    ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+    tc = ws.cell(row=row_num, column=1, value=f"Timesheet Report: {from_date} to {to_date}")
+    tc.fill, tc.font, tc.alignment = title_fill, title_font, center
     row_num += 2
-    
-    # Check if there's any data
-    if not client_data:
-        # No data found - show message
-        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=4)
-        no_data_cell = ws.cell(row=row_num, column=1, value="No data found for the selected date range and filters")
-        no_data_cell.alignment = header_alignment
-        no_data_cell.font = Font(italic=True, size=12)
-        row_num += 2
-        
-        # Still show column headers for reference
-        headers = ["Task Name", "Production", "Hours", "Efficiency"]
-        for col_num, header in enumerate(headers, 1):
-            cell = ws.cell(row=row_num, column=col_num, value=header)
-            cell.fill = column_header_fill
-            cell.font = column_header_font
-            cell.alignment = header_alignment
-            cell.border = border_style
+
+    # Column header row
+    headers = ["Client", "Employee", "Task Name", "Production", "Hours", "Efficiency"]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=row_num, column=col, value=header)
+        cell.fill, cell.font, cell.alignment, cell.border = header_fill, header_font, center, border
+    row_num += 1
+
+    if not rows:
+        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
+        nd = ws.cell(row=row_num, column=1, value="No data found for the selected date range and filters")
+        nd.alignment = center
+        nd.font = Font(italic=True, size=12)
     else:
-        # Styling for subtotal rows
-        subtotal_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-        subtotal_font = Font(bold=True, size=11)
-        
-        # Styling for grand total
-        grand_total_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
-        grand_total_font = Font(bold=True, size=12)
-        
-        grand_total_production = 0
-        
-        # Iterate through each client
-        for client_name, tasks in client_data.items():
-            # Client header (merged across 4 columns)
-            ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=4)
-            client_cell = ws.cell(row=row_num, column=1, value=client_name)
-            client_cell.fill = client_header_fill
-            client_cell.font = client_header_font
-            client_cell.alignment = header_alignment
+        grand_production = 0.0
+        grand_hours = 0.0
+
+        for r in rows:
+            ws.cell(row=row_num, column=1, value=r['client_name']).border = border
+            ws.cell(row=row_num, column=2, value=r['employee_name']).border = border
+            ws.cell(row=row_num, column=3, value=r['task_name']).border = border
+            ws.cell(row=row_num, column=4, value=r['production']).border = border
+            ws.cell(row=row_num, column=5, value=r['hours']).border = border
+            ws.cell(row=row_num, column=6, value=r['efficiency']).border = border
             row_num += 1
-            
-            # Column headers
-            headers = ["Task Name", "Production", "Hours", "Efficiency"]
-            for col_num, header in enumerate(headers, 1):
-                cell = ws.cell(row=row_num, column=col_num, value=header)
-                cell.fill = column_header_fill
-                cell.font = column_header_font
-                cell.alignment = header_alignment
-                cell.border = border_style
-            row_num += 1
-            
-            # Calculate client subtotal
-            client_total_production = 0
-            client_total_hours = 0
-            
-            # Task data for this client
-            for task in tasks:
-                # Calculate efficiency as production/hours (not multiplied by 100)
-                efficiency = (task['production'] / task['hours']) if task['hours'] > 0 else 0
-                
-                ws.cell(row=row_num, column=1, value=task['task_name']).border = border_style
-                ws.cell(row=row_num, column=2, value=task['production']).border = border_style
-                ws.cell(row=row_num, column=3, value=task['hours']).border = border_style
-                # Format efficiency as number with 2 decimal places (no % symbol)
-                ws.cell(row=row_num, column=4, value=round(efficiency, 2)).border = border_style
-                row_num += 1
-                
-                client_total_production += task['production']
-                client_total_hours += task['hours']
-            
-            # Add Production Sub Total row for this client
-            subtotal_cell = ws.cell(row=row_num, column=1, value="Production Sub Total")
-            subtotal_cell.fill = subtotal_fill
-            subtotal_cell.font = subtotal_font
-            subtotal_cell.border = border_style
-            
-            production_cell = ws.cell(row=row_num, column=2, value=round(client_total_production, 2))
-            production_cell.fill = subtotal_fill
-            production_cell.font = subtotal_font
-            production_cell.border = border_style
-            
-            hours_cell = ws.cell(row=row_num, column=3, value=round(client_total_hours, 2))
-            hours_cell.fill = subtotal_fill
-            hours_cell.font = subtotal_font
-            hours_cell.border = border_style
-            
-            client_efficiency = (client_total_production / client_total_hours) if client_total_hours > 0 else 0
-            efficiency_cell = ws.cell(row=row_num, column=4, value=round(client_efficiency, 2))
-            efficiency_cell.fill = subtotal_fill
-            efficiency_cell.font = subtotal_font
-            efficiency_cell.border = border_style
-            
-            row_num += 1
-            
-            # Add to grand total
-            grand_total_production += client_total_production
-            
-            # Add empty row between clients
-            row_num += 1
-        
-        # Add Total Production at the end
-        row_num += 1  # Extra spacing before grand total
-        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=1)
-        total_label_cell = ws.cell(row=row_num, column=1, value="TOTAL PRODUCTION")
-        total_label_cell.fill = grand_total_fill
-        total_label_cell.font = grand_total_font
-        total_label_cell.alignment = header_alignment
-        total_label_cell.border = border_style
-        
-        total_value_cell = ws.cell(row=row_num, column=2, value=round(grand_total_production, 2))
-        total_value_cell.fill = grand_total_fill
-        total_value_cell.font = grand_total_font
-        total_value_cell.alignment = header_alignment
-        total_value_cell.border = border_style
-    
-    # Auto-adjust column widths
-    ws.column_dimensions['A'].width = 30
-    ws.column_dimensions['B'].width = 15
-    ws.column_dimensions['C'].width = 15
-    ws.column_dimensions['D'].width = 15
-    
-    # Save to BytesIO
+            grand_production += r['production']
+            grand_hours += r['hours']
+
+        # Grand total row
+        row_num += 1
+        grand_efficiency = round(grand_production / grand_hours, 2) if grand_hours > 0 else 0
+
+        labels = ["TOTAL", "", "", round(grand_production, 2), round(grand_hours, 2), grand_efficiency]
+        for col, val in enumerate(labels, 1):
+            cell = ws.cell(row=row_num, column=col, value=val)
+            cell.fill, cell.font, cell.alignment, cell.border = total_fill, total_font, center, border
+
+    # Column widths
+    col_widths = [25, 20, 25, 14, 12, 14]
+    for col, width in zip("ABCDEF", col_widths):
+        ws.column_dimensions[col].width = width
+
     excel_file = BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
-    
-    # Generate filename
-    filename = f"productivity_report_{from_date}_{to_date}.xlsx"
-    
+
+    filename = f"timesheet_report_{from_date}_{to_date}.xlsx"
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

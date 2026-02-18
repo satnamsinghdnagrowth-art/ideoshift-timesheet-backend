@@ -306,6 +306,15 @@ class TimesheetReportItem(BaseModel):
     admin_comment: Optional[str]
 
 
+class ProductionReportItem(BaseModel):
+    client_name: str
+    employee_name: str
+    task_name: str
+    production: float
+    hours: float
+    efficiency: float
+
+
 class AttendanceStatus(str):
     PRESENT = "PRESENT"
     LEAVE = "LEAVE"
@@ -317,7 +326,11 @@ class AttendanceReportItem(BaseModel):
     date: date
     employee_name: str
     employee_email: str
-    attendance_status: str
+    attendance_status: str  # PRESENT, ABSENT, LEAVE, PENDING, HOLIDAY
+    is_holiday: bool = False
+    holiday_name: Optional[str] = None
+    production: Optional[float] = None
+    client_names: Optional[str] = None  # comma-separated client names
 
 
 class LeaveReportItem(BaseModel):

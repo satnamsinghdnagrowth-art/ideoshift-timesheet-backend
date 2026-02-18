@@ -50,6 +50,14 @@ class AdminDashboardStats(BaseModel):
     entries_today: int
     entries_this_week: int
     entries_this_month: int
+    # Previous period comparison fields
+    previous_total_entries: Optional[int] = 0
+    previous_approved_entries: Optional[int] = 0
+    previous_total_hours: Optional[Decimal] = Decimal(0)
+    previous_active_users_count: Optional[int] = 0
+    previous_active_clients_count: Optional[int] = 0
+    entries_last_week: Optional[int] = 0
+    entries_last_month: Optional[int] = 0
     # Client counts by status
     active_clients_count: int
     inactive_clients_count: int
@@ -61,6 +69,7 @@ class AdminDashboardStats(BaseModel):
     chart_metadata: ChartMetadata
     client_breakdown: List[ChartDataPoint]
     profitable_breakdown: List[ChartDataPoint]
+    client_production_breakdown: List[ChartDataPoint] = []  # Production items by client
 
 
 class EmployeeDashboardStats(BaseModel):
@@ -280,6 +289,231 @@ def generate_hours_chart(
         return generate_monthly_chart(db, from_date, to_date, user_id, client_id)
 
 
+def get_filtered_stats(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None,
+    is_profitable: Optional[bool] = None,
+    use_date_filter: bool = True
+) -> dict:
+    """Calculate dashboard stats respecting all filters.
+    
+    Args:
+        db: Database session
+        from_date: Start date for filtering
+        to_date: End date for filtering
+        user_id: Filter by specific user (optional)
+        client_id: Filter by specific client (optional)
+        is_profitable: Filter by profitability (optional)
+        use_date_filter: Whether to apply date range filter
+    
+    Returns:
+        Dictionary with filtered stats
+    """
+    today = date.today()
+    
+    # Base query for task entries with all filters
+    base_query = db.query(TaskEntry)
+    
+    if use_date_filter:
+        base_query = base_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+    
+    base_query = base_query.join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        base_query = base_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        base_query = base_query.filter(TaskEntry.user_id == user_id)
+    if is_profitable is not None:
+        base_query = base_query.join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id)
+        base_query = base_query.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id)
+        base_query = base_query.filter(TaskMaster.is_profitable == is_profitable)
+    
+    # Total entries by status (filtered)
+    total_entries = base_query.count()
+    approved_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.APPROVED).count()
+    pending_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.PENDING).count()
+    rejected_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.REJECTED).count()
+    
+    # Active users (users who have entries in filtered results)
+    active_users_query = db.query(func.count(func.distinct(TaskEntry.user_id)))
+    
+    if use_date_filter:
+        active_users_query = active_users_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+    
+    active_users_query = active_users_query.join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        active_users_query = active_users_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        active_users_query = active_users_query.filter(TaskEntry.user_id == user_id)
+    
+    active_users_count = active_users_query.scalar() or 0
+    
+    # Active clients (clients with entries in filtered results)
+    active_clients_query = db.query(func.count(func.distinct(TaskEntry.client_id)))
+    
+    if use_date_filter:
+        active_clients_query = active_clients_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+    
+    active_clients_query = active_clients_query.join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        active_clients_query = active_clients_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        active_clients_query = active_clients_query.filter(TaskEntry.user_id == user_id)
+    
+    active_clients_count = active_clients_query.scalar() or 0
+    
+    # Entries for Today
+    entries_today_query = db.query(func.count(TaskEntry.id)).filter(
+        TaskEntry.work_date == today
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        entries_today_query = entries_today_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        entries_today_query = entries_today_query.filter(TaskEntry.user_id == user_id)
+    
+    entries_today = entries_today_query.scalar() or 0
+    
+    # Entries for This Week
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+    
+    entries_this_week_query = db.query(func.count(TaskEntry.id)).filter(
+        TaskEntry.work_date >= week_start,
+        TaskEntry.work_date <= week_end
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        entries_this_week_query = entries_this_week_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        entries_this_week_query = entries_this_week_query.filter(TaskEntry.user_id == user_id)
+    
+    entries_this_week = entries_this_week_query.scalar() or 0
+    
+    # This month
+    month_start = today.replace(day=1)
+    if today.month == 12:
+        month_end = today.replace(day=31)
+    else:
+        next_month = today.replace(month=today.month + 1, day=1)
+        month_end = next_month - timedelta(days=1)
+    
+    entries_this_month_query = db.query(func.count(TaskEntry.id)).filter(
+        TaskEntry.work_date >= month_start,
+        TaskEntry.work_date <= month_end
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+    
+    if client_id:
+        entries_this_month_query = entries_this_month_query.filter(TaskEntry.client_id == client_id)
+    if user_id:
+        entries_this_month_query = entries_this_month_query.filter(TaskEntry.user_id == user_id)
+    
+    entries_this_month = entries_this_month_query.scalar() or 0
+    
+    return {
+        'total_entries': total_entries,
+        'approved_entries': approved_entries,
+        'pending_entries': pending_entries,
+        'rejected_entries': rejected_entries,
+        'active_users_count': active_users_count,
+        'active_clients_count': active_clients_count,
+        'entries_today': entries_today,
+        'entries_this_week': entries_this_week,
+        'entries_this_month': entries_this_month,
+    }
+
+
+def get_production_breakdown(
+    db: Session,
+    from_date: date,
+    to_date: date,
+    user_id: Optional[UUID] = None,
+    client_id: Optional[UUID] = None,
+    is_profitable: Optional[bool] = None,
+    apply_date_filter: bool = True
+) -> List[ChartDataPoint]:
+    """Get production breakdown by client for approved entries.
+    
+    Args:
+        db: Database session
+        from_date: Start date for filtering
+        to_date: End date for filtering
+        user_id: Filter by specific user (optional)
+        client_id: Filter by specific client (optional)
+        is_profitable: Filter by profitability (optional)
+        apply_date_filter: Whether to apply date range filter (default: True)
+    
+    Returns:
+        List of production breakdown by client
+    """
+    query = db.query(
+        func.coalesce(Client.name, 'No Client').label('client_name'),
+        func.sum(TaskSubEntry.production).label('total_production')
+    ).join(
+        TaskEntry, TaskSubEntry.task_entry_id == TaskEntry.id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id
+    ).join(
+        User, TaskEntry.user_id == User.id
+    ).filter(
+        TaskEntry.status == TaskEntryStatus.APPROVED,  # Only APPROVED entries
+        TaskSubEntry.production > Decimal(0),          # Only production > 0
+        User.role == UserRole.EMPLOYEE                 # Only employees
+    )
+    
+    # Apply date range filter if enabled
+    if apply_date_filter:
+        query = query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+    
+    # Apply client filter if provided
+    if client_id:
+        query = query.filter(TaskSubEntry.client_id == client_id)
+    
+    # Apply user filter if provided
+    if user_id:
+        query = query.filter(TaskEntry.user_id == user_id)
+    
+    # Apply profitability filter if provided
+    if is_profitable is not None:
+        query = query.join(
+            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+        ).join(
+            TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
+        ).filter(
+            TaskMaster.is_profitable == is_profitable
+        )
+    
+    query = query.group_by(Client.name).order_by(
+        func.sum(TaskSubEntry.production).desc()
+    )
+    
+    results = query.all()
+    return [
+        ChartDataPoint(
+            name=row[0] or 'No Client',
+            value=int(float(row[1])) if row[1] else 0
+        )
+        for row in results
+    ]
+
+
 @router.get("/admin/stats", response_model=AdminDashboardStats)
 def get_admin_stats(
     from_date: Optional[date] = Query(None),
@@ -292,6 +526,10 @@ def get_admin_stats(
     current_user: User = Depends(require_admin)
 ):
     """Get admin dashboard statistics with filters (admin only)."""
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
     # Handle date_range filter
     use_date_filter = True
     if date_range == 'all':
@@ -330,11 +568,25 @@ def get_admin_stats(
         base_query = base_query.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id)
         base_query = base_query.filter(TaskMaster.is_profitable == is_profitable)
     
-    # Total entries by status
-    total_entries = base_query.count()
-    approved_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.APPROVED).count()
-    pending_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.PENDING).count()
-    rejected_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.REJECTED).count()
+    # Get all filtered stats
+    filtered_stats = get_filtered_stats(
+        db, 
+        from_date, 
+        to_date, 
+        user_id=user_id,
+        client_id=client_id,
+        is_profitable=is_profitable,
+        use_date_filter=use_date_filter
+    )
+    
+    total_entries = filtered_stats['total_entries']
+    approved_entries = filtered_stats['approved_entries']
+    pending_entries = filtered_stats['pending_entries']
+    rejected_entries = filtered_stats['rejected_entries']
+    active_users = filtered_stats['active_users_count']
+    entries_today = filtered_stats['entries_today']
+    entries_this_week = filtered_stats['entries_this_week']
+    entries_this_month = filtered_stats['entries_this_month']
     
     # Total hours
     total_hours_query = db.query(func.sum(TaskEntry.total_hours)).filter(
@@ -365,13 +617,7 @@ def get_admin_stats(
     
     total_overtime = total_overtime_query.scalar() or Decimal(0)
     
-    # Active users count (employees only)
-    active_users = db.query(func.count(User.id)).filter(
-        User.is_active == True,
-        User.role == UserRole.EMPLOYEE
-    ).scalar() or 0
-    
-    # Client counts by status
+    # Client counts by status (NOT filtered by date/client/user - these are static master data)
     active_clients_count = db.query(func.count(Client.id)).filter(
         Client.status == ClientStatus.ACTIVE
     ).scalar() or 0
@@ -387,32 +633,6 @@ def get_admin_stats(
     demo_clients_count = db.query(func.count(Client.id)).filter(
         Client.status == ClientStatus.DEMO
     ).scalar() or 0
-    
-    # Today's stats
-    today = date.today()
-    entries_today = db.query(func.count(TaskEntry.id)).filter(
-        TaskEntry.work_date == today
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
-    
-    # This week
-    week_start = today - timedelta(days=today.weekday())
-    week_end = week_start + timedelta(days=6)
-    entries_this_week = db.query(func.count(TaskEntry.id)).filter(
-        TaskEntry.work_date >= week_start,
-        TaskEntry.work_date <= week_end
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
-    
-    # This month
-    month_start = today.replace(day=1)
-    if today.month == 12:
-        month_end = today.replace(day=31)
-    else:
-        next_month = today.replace(month=today.month + 1, day=1)
-        month_end = next_month - timedelta(days=1)
-    entries_this_month = db.query(func.count(TaskEntry.id)).filter(
-        TaskEntry.work_date >= month_start,
-        TaskEntry.work_date <= month_end
-    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
     
     # Chart data - Status breakdown
     status_chart = [
@@ -481,6 +701,86 @@ def get_admin_stats(
         name = "Profitable" if row[0] else "Non-Profitable"
         profitable_breakdown.append(ChartDataPoint(name=name, value=row[1]))
     
+    # Production breakdown by client
+    client_production_breakdown = get_production_breakdown(
+        db, 
+        from_date, 
+        to_date, 
+        user_id=user_id,
+        client_id=client_id,
+        is_profitable=is_profitable,
+        apply_date_filter=use_date_filter
+    )
+    
+    previous_total_entries = 0
+    previous_approved_entries = 0
+    previous_total_hours = Decimal(0)
+    previous_active_users_count = active_users  # Static for now
+    previous_active_clients_count = active_clients_count  # Static for now
+    entries_last_week = 0
+    entries_last_month = 0
+    
+    # Only calculate previous periods if current period is date-filtered
+    if use_date_filter and from_date != date.today():
+        # Calculate period length
+        period_length = (to_date - from_date).days + 1
+        previous_from_date = from_date - timedelta(days=period_length)
+        previous_to_date = from_date - timedelta(days=1)
+        
+        # Previous period totals
+        previous_query = db.query(TaskEntry).filter(
+            TaskEntry.work_date >= previous_from_date,
+            TaskEntry.work_date <= previous_to_date
+        ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+        
+        if client_id:
+            previous_query = previous_query.filter(TaskEntry.client_id == client_id)
+        if user_id:
+            previous_query = previous_query.filter(TaskEntry.user_id == user_id)
+        
+        previous_total_entries = previous_query.count()
+        previous_approved_entries = previous_query.filter(TaskEntry.status == TaskEntryStatus.APPROVED).count()
+        
+        # Previous hours
+        previous_hours_query = db.query(func.sum(TaskEntry.total_hours)).filter(
+            TaskEntry.work_date >= previous_from_date,
+            TaskEntry.work_date <= previous_to_date,
+            TaskEntry.status == TaskEntryStatus.APPROVED
+        ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
+        
+        if client_id:
+            previous_hours_query = previous_hours_query.filter(TaskEntry.client_id == client_id)
+        if user_id:
+            previous_hours_query = previous_hours_query.filter(TaskEntry.user_id == user_id)
+        
+        previous_total_hours = previous_hours_query.scalar() or Decimal(0)
+    
+    # Last week entries (always calculate for comparison)
+    last_week_start = week_start - timedelta(days=7)
+    last_week_end = week_end - timedelta(days=7)
+    entries_last_week = db.query(func.count(TaskEntry.id)).filter(
+        TaskEntry.work_date >= last_week_start,
+        TaskEntry.work_date <= last_week_end
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
+    
+    # Last month entries (always calculate for comparison)
+    if today.month == 1:
+        last_month_start = today.replace(year=today.year - 1, month=12, day=1)
+        last_month_end = today.replace(year=today.year - 1, month=12, day=31)
+    else:
+        last_month_start = today.replace(month=today.month - 1, day=1)
+        if today.month - 1 == 2:
+            last_month_end = last_month_start.replace(day=28 if today.year % 4 != 0 else 29)
+        else:
+            days_in_month = monthrange(today.year, today.month - 1)[1]
+            last_month_end = last_month_start.replace(day=days_in_month)
+    
+    entries_last_month = db.query(func.count(TaskEntry.id)).filter(
+        TaskEntry.work_date >= last_month_start,
+        TaskEntry.work_date <= last_month_end
+    ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE).scalar() or 0
+    
+    
     return AdminDashboardStats(
         total_entries=total_entries,
         approved_entries=approved_entries,
@@ -492,6 +792,13 @@ def get_admin_stats(
         entries_today=entries_today,
         entries_this_week=entries_this_week,
         entries_this_month=entries_this_month,
+        previous_total_entries=previous_total_entries,
+        previous_approved_entries=previous_approved_entries,
+        previous_total_hours=previous_total_hours,
+        previous_active_users_count=previous_active_users_count,
+        previous_active_clients_count=previous_active_clients_count,
+        entries_last_week=entries_last_week,
+        entries_last_month=entries_last_month,
         active_clients_count=active_clients_count,
         inactive_clients_count=inactive_clients_count,
         backlog_clients_count=backlog_clients_count,
@@ -500,7 +807,8 @@ def get_admin_stats(
         daily_hours_chart=daily_hours,
         chart_metadata=chart_metadata,
         client_breakdown=client_breakdown,
-        profitable_breakdown=profitable_breakdown
+        profitable_breakdown=profitable_breakdown,
+        client_production_breakdown=client_production_breakdown
     )
 
 
