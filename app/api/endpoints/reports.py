@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_
 from typing import List, Optional
 from uuid import UUID
 from datetime import date, timedelta
@@ -149,19 +149,29 @@ def get_attendance_report(
         ).all()
     }
 
-    # Approved leaves: set of (user_id_str, leave_date)
-    leave_date_set: set = set()
-    for lr in db.query(LeaveRequest.user_id, LeaveRequest.from_date, LeaveRequest.to_date).filter(
-        LeaveRequest.status == LeaveStatus.APPROVED,
-        LeaveRequest.from_date <= to_date,
-        LeaveRequest.to_date >= from_date,
-        LeaveRequest.user_id.in_(user_id_strs)
-    ).all():
-        d = lr.from_date
-        while d <= lr.to_date:
-            if from_date <= d <= to_date:
-                leave_date_set.add((str(lr.user_id), d))
-            d += timedelta(days=1)
+    # Leave task detection: find TaskMaster IDs whose name contains leave keywords.
+    # This mirrors the frontend isLeaveTask() logic.
+    _leave_keywords = ['leave', 'sick', 'vacation', 'absent', 'off day', 'time off']
+    _leave_tm_ids = {
+        row.id for row in db.query(TaskMaster.id).filter(
+            or_(*(func.lower(TaskMaster.name).contains(kw) for kw in _leave_keywords))
+        ).all()
+    }
+
+    # Leave entry set: (user_id_str, work_date) for APPROVED entries that contain
+    # at least one sub-entry mapped to a leave-type task master.
+    leave_entry_set: set = {
+        (str(row.user_id), row.work_date)
+        for row in db.query(TaskEntry.user_id, TaskEntry.work_date).join(
+            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+        ).filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date,
+            TaskEntry.status == TaskEntryStatus.APPROVED,
+            TaskEntry.user_id.in_(user_id_strs),
+            TaskSubEntry.task_master_id.in_(_leave_tm_ids),
+        ).distinct().all()
+    }
 
     # Task entry statuses: {(user_id_str, work_date): highest_priority_status}
     STATUS_PRIORITY = {
@@ -243,17 +253,18 @@ def get_attendance_report(
                 uid = str(user.id)
                 entry_key = (uid, current_date)
 
-                if entry_key in leave_date_set:
-                    attendance_status = "LEAVE"
-                    production = None
-                    client_names_str = None
-                elif entry_key in entry_map:
+                if entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
-                        attendance_status = "PRESENT"
-                        pd = prod_map.get(entry_key)
-                        production = round(pd['production'], 2) if pd else 0.0
-                        client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
+                        if entry_key in leave_entry_set:
+                            attendance_status = "LEAVE"
+                            production = None
+                            client_names_str = None
+                        else:
+                            attendance_status = "PRESENT"
+                            pd = prod_map.get(entry_key)
+                            production = round(pd['production'], 2) if pd else 0.0
+                            client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
                     elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
                         attendance_status = "PENDING"
                         production = None
@@ -388,18 +399,24 @@ async def export_attendance_to_excel(
             WorkingSaturday.work_date >= from_date, WorkingSaturday.work_date <= to_date
         ).all()
     }
-    leave_date_set: set = set()
-    for lr in db.query(LeaveRequest.user_id, LeaveRequest.from_date, LeaveRequest.to_date).filter(
-        LeaveRequest.status == LeaveStatus.APPROVED,
-        LeaveRequest.from_date <= to_date,
-        LeaveRequest.to_date >= from_date,
-        LeaveRequest.user_id.in_(user_id_strs)
-    ).all():
-        d = lr.from_date
-        while d <= lr.to_date:
-            if from_date <= d <= to_date:
-                leave_date_set.add((str(lr.user_id), d))
-            d += timedelta(days=1)
+    _leave_keywords = ['leave', 'sick', 'vacation', 'absent', 'off day', 'time off']
+    _leave_tm_ids = {
+        row.id for row in db.query(TaskMaster.id).filter(
+            or_(*(func.lower(TaskMaster.name).contains(kw) for kw in _leave_keywords))
+        ).all()
+    }
+    leave_entry_set: set = {
+        (str(row.user_id), row.work_date)
+        for row in db.query(TaskEntry.user_id, TaskEntry.work_date).join(
+            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+        ).filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date,
+            TaskEntry.status == TaskEntryStatus.APPROVED,
+            TaskEntry.user_id.in_(user_id_strs),
+            TaskSubEntry.task_master_id.in_(_leave_tm_ids),
+        ).distinct().all()
+    }
 
     STATUS_PRIORITY = {
         TaskEntryStatus.APPROVED: 4, TaskEntryStatus.PENDING: 3,
@@ -458,17 +475,18 @@ async def export_attendance_to_excel(
             for user in users:
                 uid = str(user.id)
                 entry_key = (uid, current_date)
-                if entry_key in leave_date_set:
-                    rows.append({'date': str(current_date), 'employee': user.name,
-                                 'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
-                elif entry_key in entry_map:
+                if entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
-                        pd = prod_map.get(entry_key)
-                        rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
-                                     'holiday_name': None,
-                                     'production': round(pd['production'], 2) if pd else 0.0,
-                                     'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
+                        if entry_key in leave_entry_set:
+                            rows.append({'date': str(current_date), 'employee': user.name,
+                                         'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
+                        else:
+                            pd = prod_map.get(entry_key)
+                            rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
+                                         'holiday_name': None,
+                                         'production': round(pd['production'], 2) if pd else 0.0,
+                                         'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
                     elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
                         rows.append({'date': str(current_date), 'employee': user.name,
                                      'status': 'PENDING', 'holiday_name': None, 'production': None, 'clients': None})
