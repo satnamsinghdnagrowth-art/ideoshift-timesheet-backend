@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.endpoints import auth, users, clients, task_entries, leave_requests, approvals, reports, task_masters, dashboard, profile, working_saturdays, holidays
+from app.api.endpoints import auth, users, clients, task_entries, leave_requests, approvals, reports, task_masters, dashboard, profile, working_saturdays, holidays, bulk_upload
 
 app = FastAPI(
     title="Timesheet & Attendance Management System",
@@ -37,6 +37,7 @@ app.include_router(reports.user_reports_router)  # User reports
 app.include_router(dashboard.router)
 app.include_router(working_saturdays.router)  # Working Saturdays
 app.include_router(holidays.router)  # Holidays
+app.include_router(bulk_upload.router)  # Bulk upload
 
 
 @app.get("/")

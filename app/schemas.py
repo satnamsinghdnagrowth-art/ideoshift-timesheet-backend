@@ -470,3 +470,38 @@ class HolidayBulkCreate(BaseModel):
         if not v:
             raise ValueError('At least one holiday is required')
         return v
+
+
+# ============= Bulk Task Entry Upload Schemas =============
+class BulkTaskEntryRecord(BaseModel):
+    """Represents a single task entry record from Excel upload"""
+    date: date
+    coder_name: str
+    client: str
+    task: str
+    count: Decimal  # Production time
+    time: Decimal   # Hours
+
+
+class BulkTaskEntryUploadResult(BaseModel):
+    """Result of a single record in bulk upload"""
+    success: bool
+    message: str
+    coder_name: Optional[str] = None
+    client_name: Optional[str] = None
+    task_name: Optional[str] = None
+    date: Optional[date] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BulkTaskEntryUploadResponse(BaseModel):
+    """Response from bulk task entry upload"""
+    total_records: int
+    successful: int
+    failed: int
+    results: List[BulkTaskEntryUploadResult]
+    
+    class Config:
+        from_attributes = True

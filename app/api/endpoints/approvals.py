@@ -5,7 +5,7 @@ from uuid import UUID
 from datetime import datetime
 from app.db.session import get_db
 from app.models.user import User
-from app.models.task_entry import TaskEntry, TaskEntryStatus
+from app.models.task_entry import TaskEntry, TaskEntryStatus, TaskSubEntry
 from app.models.leave_request import LeaveRequest, LeaveStatus
 from app.schemas import TaskEntryResponse, LeaveRequestResponse, ApprovalRequest, RejectRequest
 from app.api.dependencies import require_admin
@@ -25,7 +25,9 @@ def list_pending_task_entries(
     """List task entries for approval (admin only)."""
     query = db.query(TaskEntry).options(
         joinedload(TaskEntry.user),
-        joinedload(TaskEntry.client)
+        joinedload(TaskEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.client),
+        joinedload(TaskEntry.sub_entries).joinedload(TaskSubEntry.task_master)
     )
     
     if status_filter:
