@@ -79,7 +79,17 @@ def update_user(
     # Update fields
     update_data = user_update.dict(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(user, field, value)
+        if value is not None:
+            # Handle role as enum
+            if field == 'role' and isinstance(value, str):
+                try:
+                    value = UserRole(value)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Invalid role: {value}. Must be one of: {', '.join([r.value for r in UserRole])}"
+                    )
+            setattr(user, field, value)
     
     user.updated_by = current_user.id
     
