@@ -121,7 +121,10 @@ def get_attendance_report(
         )
 
     # ── Load employees ────────────────────────────────────────────────────
-    user_query = db.query(User).filter(User.is_active == True, User.role == 'EMPLOYEE')
+    user_query = db.query(User).filter(
+        User.is_active == True, 
+        User.role.in_(['EMPLOYEE', 'SUPERVISOR'])
+    )
     if user_ids:
         uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
         if uid_list:
@@ -253,7 +256,13 @@ def get_attendance_report(
                 uid = str(user.id)
                 entry_key = (uid, current_date)
 
-                if entry_key in entry_map:
+                # For supervisors, skip status checking and always show PRESENT
+                if user.role == 'SUPERVISOR':
+                    attendance_status = "PRESENT"
+                    pd = prod_map.get(entry_key)
+                    production = round(pd['production'], 2) if pd else 0.0
+                    client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
+                elif entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
                         if entry_key in leave_entry_set:
@@ -379,7 +388,10 @@ async def export_attendance_to_excel(
 
     # Reuse the same report-building logic by calling the endpoint function directly
     # Build report data inline (same logic as get_attendance_report)
-    user_query = db.query(User).filter(User.is_active == True, User.role == 'EMPLOYEE')
+    user_query = db.query(User).filter(
+        User.is_active == True, 
+        User.role.in_(['EMPLOYEE', 'SUPERVISOR'])
+    )
     if user_ids:
         uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
         if uid_list:
@@ -475,7 +487,15 @@ async def export_attendance_to_excel(
             for user in users:
                 uid = str(user.id)
                 entry_key = (uid, current_date)
-                if entry_key in entry_map:
+                
+                # For supervisors, skip status checking and always show PRESENT
+                if user.role == 'SUPERVISOR':
+                    pd = prod_map.get(entry_key)
+                    rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
+                                 'holiday_name': None,
+                                 'production': round(pd['production'], 2) if pd else 0.0,
+                                 'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
+                elif entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
                         if entry_key in leave_entry_set:

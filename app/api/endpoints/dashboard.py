@@ -469,11 +469,16 @@ def get_production_breakdown(
         Client, TaskSubEntry.client_id == Client.id
     ).join(
         User, TaskEntry.user_id == User.id
+    ).join(
+        TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
     ).filter(
         TaskEntry.status == TaskEntryStatus.APPROVED,  # Only APPROVED entries
-        TaskSubEntry.production > Decimal(0),          # Only production > 0
         User.role == UserRole.EMPLOYEE                 # Only employees
     )
+    
+    # Apply profitability filter if provided
+    if is_profitable is not None:
+        query = query.filter(TaskMaster.is_profitable == is_profitable)
     
     # Apply date range filter if enabled
     if apply_date_filter:
@@ -489,16 +494,6 @@ def get_production_breakdown(
     # Apply user filter if provided
     if user_id:
         query = query.filter(TaskEntry.user_id == user_id)
-    
-    # Apply profitability filter if provided
-    if is_profitable is not None:
-        query = query.join(
-            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
-        ).join(
-            TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
-        ).filter(
-            TaskMaster.is_profitable == is_profitable
-        )
     
     query = query.group_by(Client.name).order_by(
         func.sum(TaskSubEntry.production).desc()

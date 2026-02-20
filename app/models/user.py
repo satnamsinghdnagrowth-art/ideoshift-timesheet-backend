@@ -9,6 +9,7 @@ from app.db.session import Base
 class UserRole(str, enum.Enum):
     ADMIN = "ADMIN"
     EMPLOYEE = "EMPLOYEE"
+    SUPERVISOR = "SUPERVISOR"
 
 
 class User(Base):
