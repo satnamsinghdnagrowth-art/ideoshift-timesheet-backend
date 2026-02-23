@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, select
 from typing import List, Optional
 import uuid
 from uuid import UUID
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from app.db.session import get_db
 from app.models.user import User
@@ -14,7 +14,7 @@ from app.models.client import Client
 from app.models.task_master import TaskMaster
 from app.models.working_saturday import WorkingSaturday
 from app.models.holiday import Holiday
-from app.schemas import TaskEntryCreate, TaskEntryUpdate, TaskEntryResponse
+from app.schemas import TaskEntryCreate, TaskEntryUpdate, TaskEntryResponse, DeletionRequestCreate
 from app.api.dependencies import get_current_user, require_admin
 
 router = APIRouter(prefix="/task-entries", tags=["Task Entries"])
@@ -40,68 +40,46 @@ def is_weekend(work_date: date) -> bool:
 def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) -> tuple[TaskEntryStatus, bool, Decimal]:
     """
     Calculate task entry status based on date and hours.
-    
+
     Returns: (status, is_overtime, overtime_hours)
-    
-    Auto-approval rules (priority order):
-    1. Exactly 8 hours on any day: APPROVED (includes leave entries)
-    2. Holiday: All hours are overtime, PENDING (requires approval)
-    3. Working Saturday with ≤ 8 hours: APPROVED
-    4. Everything else: PENDING (requires admin approval)
-    
-    Overtime rules:
-    - Holiday: All hours are overtime
-    - Weekend (except working Saturday): All hours are overtime
-    - Any day with > 8 hours: Hours beyond 8 are overtime
+
+    Approval rules (priority order):
+    1. Non-working day (holiday, Sunday, or Saturday not designated as working day):
+       - ALWAYS PENDING regardless of hours — admin approval required
+       - All hours count as overtime
+    2. Working day with exactly 8 hours: APPROVED (auto-approved)
+    3. Working day with > 8 hours: PENDING (overtime requires approval)
+    4. Working day with < 8 hours: PENDING (requires approval)
+
+    A working day is: Mon-Fri (not holiday), or designated working Saturday (not holiday)
+    A non-working day is: Holiday, Sunday, or Saturday (non-designated)
     """
     weekday = work_date.weekday()
     is_sat = weekday == 5
     is_sun = weekday == 6
     is_hol = is_holiday(work_date, db)
     is_work_sat = is_sat and is_working_saturday(work_date, db)
-    
-    # Priority 1: Exactly 8 hours = Auto-approve (NEW RULE - highest priority)
-    if total_hours == 8:
-        # Check if it's a holiday (holiday hours are still overtime)
-        if is_hol:
-            return TaskEntryStatus.APPROVED, True, total_hours
-        # Check if it's a non-working weekend
-        elif (is_sat or is_sun) and not is_work_sat:
-            return TaskEntryStatus.APPROVED, True, total_hours
-        else:
-            return TaskEntryStatus.APPROVED, False, Decimal(0)
-    
-    # Priority 2: Holiday (all hours are overtime, requires approval)
-    if is_hol:
+
+    # Determine if this is a non-working day (HIGHEST PRIORITY CHECK)
+    # Non-working: Holiday, Sunday, or Saturday without working Saturday designation
+    is_non_working_day = is_hol or is_sun or (is_sat and not is_work_sat)
+
+    # Priority 1: Non-working day — ALWAYS requires admin approval, all hours are overtime
+    if is_non_working_day:
         return TaskEntryStatus.PENDING, True, total_hours
-    
-    # Determine if overtime
-    is_overtime_day = (is_sat or is_sun) and not is_work_sat
-    has_overtime_hours = total_hours > 8
-    
-    # Calculate overtime hours
-    if is_overtime_day:
-        # All hours on non-working weekends are overtime
-        overtime_hours = total_hours
-        is_overtime = True
-        status = TaskEntryStatus.PENDING  # Requires approval
-    elif has_overtime_hours:
-        # Hours beyond 8 are overtime
-        overtime_hours = total_hours - Decimal(8)
-        is_overtime = True
-        status = TaskEntryStatus.PENDING  # Requires approval
-    elif is_work_sat and total_hours <= 8:
-        # Working Saturday with ≤ 8 hours: auto-approved
-        overtime_hours = Decimal(0)
-        is_overtime = False
-        status = TaskEntryStatus.APPROVED
-    else:
-        # Weekday with < 8 hours: requires approval
-        overtime_hours = Decimal(0)
-        is_overtime = False
-        status = TaskEntryStatus.PENDING
-    
-    return status, is_overtime, overtime_hours
+
+    # From here: working day (Mon-Fri non-holiday, or designated working Saturday)
+
+    # Priority 2: Exactly 8 hours on a working day — auto-approved
+    if total_hours == 8:
+        return TaskEntryStatus.APPROVED, False, Decimal(0)
+
+    # Priority 3: More than 8 hours on a working day — overtime, requires approval
+    if total_hours > 8:
+        return TaskEntryStatus.PENDING, True, total_hours - Decimal(8)
+
+    # Priority 4: Less than 8 hours on a working day — requires approval
+    return TaskEntryStatus.PENDING, False, Decimal(0)
 
 
 @router.get("", response_model=List[TaskEntryResponse])
@@ -555,17 +533,24 @@ def update_task_entry(
             total_hours += sub_data.hours
         
         task_entry.total_hours = total_hours
-        
-        # Recalculate overtime status
-        if total_hours == 8.0:
-            task_entry.is_overtime = False
-            task_entry.overtime_hours = Decimal(0)
-        elif total_hours > 8.0:
-            task_entry.is_overtime = True
-            task_entry.overtime_hours = total_hours - Decimal(8.0)
+
+        # Recalculate status and overtime using the same logic as when creating
+        # Only recalculate status if entry is not already APPROVED by admin
+        if task_entry.status != TaskEntryStatus.APPROVED:
+            entry_status, is_overtime, overtime_hours = calculate_task_status(
+                task_entry.work_date, total_hours, db
+            )
+            task_entry.status = entry_status
+            task_entry.is_overtime = is_overtime
+            task_entry.overtime_hours = overtime_hours
         else:
-            task_entry.is_overtime = False
-            task_entry.overtime_hours = Decimal(0)
+            # If already approved, only update is_overtime and overtime_hours for reference
+            # but don't change the approved status
+            _, is_overtime, overtime_hours = calculate_task_status(
+                task_entry.work_date, total_hours, db
+            )
+            task_entry.is_overtime = is_overtime
+            task_entry.overtime_hours = overtime_hours
     
     # Reset to DRAFT if it was REJECTED
     if task_entry.status == TaskEntryStatus.REJECTED:
@@ -612,35 +597,79 @@ def submit_task_entry(
     return task_entry
 
 
-@router.delete("/{task_entry_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task_entry(
+@router.delete("/{task_entry_id}", response_model=TaskEntryResponse)
+def request_task_entry_deletion(
     task_entry_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    deletion_request: Optional[DeletionRequestCreate] = Body(None)
 ):
-    """Delete a task entry (DRAFT, PENDING, REJECTED, or APPROVED entries)."""
+    """Request deletion of a task entry. Requires admin approval before actual deletion."""
     task_entry = db.query(TaskEntry).filter(
         TaskEntry.id == task_entry_id,
         TaskEntry.user_id == current_user.id
     ).first()
-    
+
     if not task_entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task entry not found"
         )
-    
-    # Allow deletion of DRAFT, PENDING, REJECTED, and APPROVED entries
-    # Users can now delete auto-approved entries
-    if task_entry.status not in [TaskEntryStatus.DRAFT, TaskEntryStatus.PENDING, TaskEntryStatus.REJECTED, TaskEntryStatus.APPROVED]:
+
+    # Guard: Cannot request deletion if already pending deletion
+    if task_entry.status == TaskEntryStatus.PENDING_DELETION:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete this task entry"
+            detail="Deletion already requested. Please wait for admin approval or cancel the request."
         )
-    
-    db.delete(task_entry)
+
+    # Save the current status before marking as pending deletion
+    task_entry.pre_deletion_status = task_entry.status
+    task_entry.status = TaskEntryStatus.PENDING_DELETION
+    task_entry.deletion_requested_at = datetime.utcnow()
+    task_entry.deletion_reason = deletion_request.reason if deletion_request else None
+    task_entry.updated_by = current_user.id
+
     db.commit()
-    return None
+    db.refresh(task_entry)
+    return task_entry
+
+
+@router.post("/{task_entry_id}/cancel-deletion", response_model=TaskEntryResponse)
+def cancel_deletion_request(
+    task_entry_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Cancel a pending deletion request and restore the entry to its previous status."""
+    task_entry = db.query(TaskEntry).filter(
+        TaskEntry.id == task_entry_id,
+        TaskEntry.user_id == current_user.id
+    ).first()
+
+    if not task_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task entry not found"
+        )
+
+    # Guard: must be in PENDING_DELETION status
+    if task_entry.status != TaskEntryStatus.PENDING_DELETION:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel deletion for entries not pending deletion"
+        )
+
+    # Restore to previous status
+    task_entry.status = task_entry.pre_deletion_status or TaskEntryStatus.APPROVED
+    task_entry.deletion_reason = None
+    task_entry.deletion_requested_at = None
+    task_entry.pre_deletion_status = None
+    task_entry.updated_by = current_user.id
+
+    db.commit()
+    db.refresh(task_entry)
+    return task_entry
 
 
 @router.delete("/admin/{task_entry_id}", status_code=status.HTTP_204_NO_CONTENT)

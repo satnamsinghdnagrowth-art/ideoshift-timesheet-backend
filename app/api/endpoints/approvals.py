@@ -79,25 +79,93 @@ def reject_task_entry(
 ):
     """Reject a task entry (admin only, comment required)."""
     task_entry = db.query(TaskEntry).filter(TaskEntry.id == task_entry_id).first()
-    
+
     if not task_entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task entry not found"
         )
-    
+
     if task_entry.status != TaskEntryStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PENDING task entries can be rejected"
         )
-    
+
     task_entry.status = TaskEntryStatus.REJECTED
     task_entry.admin_comment = reject_data.comment
     task_entry.approved_by = current_user.id
     task_entry.approved_at = datetime.utcnow()
     task_entry.updated_by = current_user.id
-    
+
+    db.commit()
+    db.refresh(task_entry)
+    return task_entry
+
+
+# ============= Task Entry Deletion Approvals =============
+@router.post("/task-entries/{task_entry_id}/approve-deletion", status_code=status.HTTP_204_NO_CONTENT)
+def approve_task_entry_deletion(
+    task_entry_id: str,
+    approval_data: ApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: Approve deletion request and hard-delete the task entry."""
+    task_entry = db.query(TaskEntry).filter(TaskEntry.id == task_entry_id).first()
+
+    if not task_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task entry not found"
+        )
+
+    if task_entry.status != TaskEntryStatus.PENDING_DELETION:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PENDING_DELETION task entries can be approved for deletion"
+        )
+
+    # Hard delete the entry
+    db.delete(task_entry)
+    db.commit()
+    return None
+
+
+@router.post("/task-entries/{task_entry_id}/reject-deletion", response_model=TaskEntryResponse)
+def reject_task_entry_deletion(
+    task_entry_id: str,
+    reject_data: RejectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: Reject deletion request and restore entry to previous status."""
+    task_entry = db.query(TaskEntry).filter(TaskEntry.id == task_entry_id).first()
+
+    if not task_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task entry not found"
+        )
+
+    if task_entry.status != TaskEntryStatus.PENDING_DELETION:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PENDING_DELETION task entries can be rejected"
+        )
+
+    # Restore to previous status
+    task_entry.status = task_entry.pre_deletion_status or TaskEntryStatus.APPROVED
+    task_entry.admin_comment = reject_data.comment
+    task_entry.approved_by = current_user.id
+    task_entry.approved_at = datetime.utcnow()
+    task_entry.updated_by = current_user.id
+
+    # Clear deletion request fields
+    task_entry.deletion_reason = None
+    task_entry.deletion_requested_at = None
+    task_entry.pre_deletion_status = None
+
     db.commit()
     db.refresh(task_entry)
     return task_entry

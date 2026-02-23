@@ -233,6 +233,9 @@ class TaskEntryResponse(TaskEntryBase):
     approved_at: Optional[datetime]
     is_overtime: bool
     overtime_hours: Decimal
+    deletion_reason: Optional[str] = None
+    deletion_requested_at: Optional[datetime] = None
+    pre_deletion_status: Optional[TaskEntryStatus] = None
     created_at: datetime
     updated_at: datetime
     sub_entries: List[TaskSubEntryResponse] = []
@@ -291,6 +294,10 @@ class ApprovalRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     comment: str = Field(..., min_length=1)
+
+
+class DeletionRequestCreate(BaseModel):
+    reason: Optional[str] = Field(None, max_length=500)
 
 
 # ============= Report Schemas =============

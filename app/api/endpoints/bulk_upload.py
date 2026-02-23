@@ -38,50 +38,46 @@ def is_weekend(work_date: date) -> bool:
 def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) -> Tuple[TaskEntryStatus, bool, Decimal]:
     """
     Calculate task entry status based on date and hours.
+
     Returns: (status, is_overtime, overtime_hours)
+
+    Approval rules (priority order):
+    1. Non-working day (holiday, Sunday, or Saturday not designated as working day):
+       - ALWAYS PENDING regardless of hours — admin approval required
+       - All hours count as overtime
+    2. Working day with exactly 8 hours: APPROVED (auto-approved)
+    3. Working day with > 8 hours: PENDING (overtime requires approval)
+    4. Working day with < 8 hours: PENDING (requires approval)
+
+    A working day is: Mon-Fri (not holiday), or designated working Saturday (not holiday)
+    A non-working day is: Holiday, Sunday, or Saturday (non-designated)
     """
     weekday = work_date.weekday()
     is_sat = weekday == 5
     is_sun = weekday == 6
     is_hol = is_holiday(work_date, db)
     is_work_sat = is_sat and is_working_saturday(work_date, db)
-    
-    # Priority 1: Exactly 8 hours = Auto-approve
-    if total_hours == 8:
-        if is_hol:
-            return TaskEntryStatus.APPROVED, True, total_hours
-        elif (is_sat or is_sun) and not is_work_sat:
-            return TaskEntryStatus.APPROVED, True, total_hours
-        else:
-            return TaskEntryStatus.APPROVED, False, Decimal(0)
-    
-    # Priority 2: Holiday (all hours are overtime, requires approval)
-    if is_hol:
+
+    # Determine if this is a non-working day (HIGHEST PRIORITY CHECK)
+    # Non-working: Holiday, Sunday, or Saturday without working Saturday designation
+    is_non_working_day = is_hol or is_sun or (is_sat and not is_work_sat)
+
+    # Priority 1: Non-working day — ALWAYS requires admin approval, all hours are overtime
+    if is_non_working_day:
         return TaskEntryStatus.PENDING, True, total_hours
-    
-    # Determine if overtime
-    is_overtime_day = (is_sat or is_sun) and not is_work_sat
-    has_overtime_hours = total_hours > 8
-    
-    # Calculate overtime hours
-    if is_overtime_day:
-        overtime_hours = total_hours
-        is_overtime = True
-        status = TaskEntryStatus.PENDING
-    elif has_overtime_hours:
-        overtime_hours = total_hours - Decimal(8)
-        is_overtime = True
-        status = TaskEntryStatus.PENDING
-    elif is_work_sat and total_hours <= 8:
-        overtime_hours = Decimal(0)
-        is_overtime = False
-        status = TaskEntryStatus.APPROVED
-    else:
-        overtime_hours = Decimal(0)
-        is_overtime = False
-        status = TaskEntryStatus.PENDING
-    
-    return status, is_overtime, overtime_hours
+
+    # From here: working day (Mon-Fri non-holiday, or designated working Saturday)
+
+    # Priority 2: Exactly 8 hours on a working day — auto-approved
+    if total_hours == 8:
+        return TaskEntryStatus.APPROVED, False, Decimal(0)
+
+    # Priority 3: More than 8 hours on a working day — overtime, requires approval
+    if total_hours > 8:
+        return TaskEntryStatus.PENDING, True, total_hours - Decimal(8)
+
+    # Priority 4: Less than 8 hours on a working day — requires approval
+    return TaskEntryStatus.PENDING, False, Decimal(0)
 
 
 @router.post("/upload-task-entries")

@@ -11,6 +11,7 @@ class TaskEntryStatus(str, enum.Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    PENDING_DELETION = "PENDING_DELETION"
 
 
 class TaskEntry(Base):
@@ -31,7 +32,12 @@ class TaskEntry(Base):
     # New fields for overtime tracking
     is_overtime = Column(Boolean, default=False, nullable=False)
     overtime_hours = Column(Numeric(4, 2), default=0, nullable=False)
-    
+
+    # Deletion request fields
+    deletion_reason = Column(String(500), nullable=True)
+    deletion_requested_at = Column(DateTime, nullable=True)
+    pre_deletion_status = Column(SQLEnum(TaskEntryStatus), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     created_by = Column(String(36), nullable=True)
