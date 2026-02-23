@@ -175,7 +175,6 @@ def get_attendance_report(
             TaskSubEntry.task_master_id.in_(_leave_tm_ids),
         ).distinct().all()
     }
-
     # Task entry statuses: {(user_id_str, work_date): highest_priority_status}
     STATUS_PRIORITY = {
         TaskEntryStatus.APPROVED: 4,
@@ -257,27 +256,26 @@ def get_attendance_report(
                 entry_key = (uid, current_date)
 
                 # For supervisors, skip status checking and always show PRESENT
+                pd = prod_map.get(entry_key)
                 if user.role == 'SUPERVISOR':
                     attendance_status = "PRESENT"
-                    pd = prod_map.get(entry_key)
                     production = round(pd['production'], 2) if pd else 0.0
                     client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
                 elif entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
-                        if entry_key in leave_entry_set:
+                        if pd and pd['production'] > 0:
+                            attendance_status = "PRESENT"
+                            production = round(pd['production'], 2)
+                            client_names_str = ", ".join(pd['clients']) if pd['clients'] else None
+                        elif entry_key in leave_entry_set:
                             attendance_status = "LEAVE"
                             production = None
                             client_names_str = None
                         else:
-                            attendance_status = "PRESENT"
-                            pd = prod_map.get(entry_key)
-                            production = round(pd['production'], 2) if pd else 0.0
-                            client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
-                    elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
-                        attendance_status = "PENDING"
-                        production = None
-                        client_names_str = None
+                            attendance_status = "ABSENT"
+                            production = None
+                            client_names_str = None
                     else:
                         attendance_status = "ABSENT"
                         production = None
@@ -498,15 +496,19 @@ async def export_attendance_to_excel(
                 elif entry_key in entry_map:
                     es = entry_map[entry_key]
                     if es == TaskEntryStatus.APPROVED:
-                        if entry_key in leave_entry_set:
-                            rows.append({'date': str(current_date), 'employee': user.name,
-                                         'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
-                        else:
-                            pd = prod_map.get(entry_key)
+                        pd = prod_map.get(entry_key)
+
+                        if pd and pd['production'] > 0:
                             rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
                                          'holiday_name': None,
                                          'production': round(pd['production'], 2) if pd else 0.0,
                                          'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
+                        elif entry_key in leave_entry_set:
+                            rows.append({'date': str(current_date), 'employee': user.name,
+                                         'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
+                        else:
+                            rows.append({'date': str(current_date), 'employee': user.name,
+                                         'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
                     elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
                         rows.append({'date': str(current_date), 'employee': user.name,
                                      'status': 'PENDING', 'holiday_name': None, 'production': None, 'clients': None})
