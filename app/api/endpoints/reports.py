@@ -106,12 +106,12 @@ def get_attendance_report(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     date_range: Optional[str] = Query(None),
-    user_ids: Optional[str] = Query(None),  # Comma-separated UUIDs
+    user_ids: Optional[str] = Query(None),
     is_profitable: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     _: User = Depends(require_admin)
 ):
-    """Get attendance report with holiday awareness and per-employee production data (admin only)."""
+
     if date_range:
         from_date, to_date = get_date_range(date_range)
     elif not from_date or not to_date:
@@ -120,22 +120,22 @@ def get_attendance_report(
             detail="Either provide from_date and to_date, or date_range"
         )
 
-    # ── Load employees ────────────────────────────────────────────────────
+    # ── Load Users ────────────────────────────────────────────────
     user_query = db.query(User).filter(
-        User.is_active == True, 
-        User.role.in_(['EMPLOYEE', 'SUPERVISOR'])
+        User.is_active == True,
+        User.role.in_(["EMPLOYEE", "SUPERVISOR"])
     )
+
     if user_ids:
-        uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
+        uid_list = [u.strip() for u in user_ids.split(",") if u.strip()]
         if uid_list:
             user_query = user_query.filter(User.id.in_(uid_list))
+
     users = user_query.order_by(User.name).all()
     user_id_strs = [str(u.id) for u in users]
 
-    # ── Pre-load reference data (bulk, no N+1 queries) ───────────────────
-
-    # Holidays in range: {holiday_date: holiday_name}
-    holiday_map: dict = {
+    # ── Holidays ─────────────────────────────────────────────────
+    holiday_map = {
         row.holiday_date: row.name
         for row in db.query(Holiday.holiday_date, Holiday.name).filter(
             Holiday.holiday_date >= from_date,
@@ -143,8 +143,8 @@ def get_attendance_report(
         ).all()
     }
 
-    # Working Saturdays in range: {work_date}
-    working_saturday_set: set = {
+    # ── Working Saturdays ───────────────────────────────────────
+    working_saturday_set = {
         row.work_date
         for row in db.query(WorkingSaturday.work_date).filter(
             WorkingSaturday.work_date >= from_date,
@@ -152,55 +152,65 @@ def get_attendance_report(
         ).all()
     }
 
-    # Leave task detection: find TaskMaster IDs whose name contains leave keywords.
-    # This mirrors the frontend isLeaveTask() logic.
-    _leave_keywords = ['leave', 'sick', 'vacation', 'absent', 'off day', 'time off']
-    _leave_tm_ids = {
+    # ── Leave Task Master (Exact Match) ─────────────────────────
+    leave_tm_ids = {
         row.id for row in db.query(TaskMaster.id).filter(
-            or_(*(func.lower(TaskMaster.name).contains(kw) for kw in _leave_keywords))
+            func.lower(TaskMaster.name) == "leave"
         ).all()
     }
 
-    # Leave entry set: (user_id_str, work_date) for APPROVED entries that contain
-    # at least one sub-entry mapped to a leave-type task master.
-    leave_entry_set: set = {
-        (str(row.user_id), row.work_date)
-        for row in db.query(TaskEntry.user_id, TaskEntry.work_date).join(
-            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
-        ).filter(
-            TaskEntry.work_date >= from_date,
-            TaskEntry.work_date <= to_date,
-            TaskEntry.status == TaskEntryStatus.APPROVED,
-            TaskEntry.user_id.in_(user_id_strs),
-            TaskSubEntry.task_master_id.in_(_leave_tm_ids),
-        ).distinct().all()
-    }
-    # Task entry statuses: {(user_id_str, work_date): highest_priority_status}
+    # ── Leave Hours Aggregation ─────────────────────────────────
+    from collections import defaultdict
+    leave_hours_map = defaultdict(float)
+
+    leave_q = db.query(
+        TaskEntry.user_id,
+        TaskEntry.work_date,
+        func.sum(TaskSubEntry.hours).label("total_leave_hours")
+    ).join(
+        TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+    ).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        TaskEntry.user_id.in_(user_id_strs),
+        TaskSubEntry.task_master_id.in_(leave_tm_ids),
+    ).group_by(
+        TaskEntry.user_id,
+        TaskEntry.work_date
+    )
+
+    for row in leave_q.all():
+        leave_hours_map[(str(row.user_id), row.work_date)] = float(row.total_leave_hours or 0)
+
+    # ── Entry Status Map ────────────────────────────────────────
     STATUS_PRIORITY = {
         TaskEntryStatus.APPROVED: 4,
         TaskEntryStatus.PENDING: 3,
         TaskEntryStatus.DRAFT: 2,
         TaskEntryStatus.REJECTED: 1,
     }
-    entry_map: dict = {}
+
+    entry_map = {}
+
     for er in db.query(TaskEntry.user_id, TaskEntry.work_date, TaskEntry.status).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
         TaskEntry.user_id.in_(user_id_strs)
     ).all():
+
         key = (str(er.user_id), er.work_date)
         if key not in entry_map or STATUS_PRIORITY.get(er.status, 0) > STATUS_PRIORITY.get(entry_map[key], 0):
             entry_map[key] = er.status
 
-    # Production data for APPROVED entries: {(user_id_str, work_date): {production, clients[]}}
-    from collections import defaultdict
-    prod_map: dict = defaultdict(lambda: {'production': 0.0, 'clients': []})
+    # ── Production Map ──────────────────────────────────────────
+    prod_map = defaultdict(lambda: {"production": 0.0, "clients": []})
 
     prod_q = db.query(
         TaskEntry.user_id,
         TaskEntry.work_date,
-        func.coalesce(Client.name, 'No Client').label('client_name'),
-        func.sum(TaskSubEntry.production).label('total_production'),
+        func.coalesce(Client.name, "No Client").label("client_name"),
+        func.sum(TaskSubEntry.production).label("total_production"),
     ).join(
         TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
     ).outerjoin(
@@ -211,94 +221,99 @@ def get_attendance_report(
         TaskEntry.status == TaskEntryStatus.APPROVED,
         TaskEntry.user_id.in_(user_id_strs),
     )
+
     if is_profitable is not None:
         prod_q = prod_q.join(
             TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
         ).filter(TaskMaster.is_profitable == is_profitable)
+
     prod_q = prod_q.group_by(TaskEntry.user_id, TaskEntry.work_date, Client.name)
 
     for pr in prod_q.all():
         key = (str(pr.user_id), pr.work_date)
-        prod_map[key]['production'] += float(pr.total_production or 0)
-        if pr.client_name and pr.client_name not in prod_map[key]['clients']:
-            prod_map[key]['clients'].append(pr.client_name)
+        prod_map[key]["production"] += float(pr.total_production or 0)
+        if pr.client_name and pr.client_name not in prod_map[key]["clients"]:
+            prod_map[key]["clients"].append(pr.client_name)
 
-    # ── Build report ─────────────────────────────────────────────────────
+    # ── Build Report ─────────────────────────────────────────────
     report_items = []
     current_date = from_date
 
     while current_date <= to_date:
-        weekday = current_date.weekday()  # 0=Mon … 6=Sun
+
+        weekday = current_date.weekday()
         is_sunday = weekday == 6
         is_saturday = weekday == 5
         is_working_saturday = current_date in working_saturday_set
         in_holiday_map = current_date in holiday_map
 
-        # Non-working day: Sunday, defined holiday, or non-working Saturday
         if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
-            holiday_label = holiday_map.get(current_date)
-            # if not holiday_label:
-            #     holiday_label = "Sunday" if is_sunday else "Saturday"
+            current_date += timedelta(days=1)
+            continue
 
-            # for user in users:
-            #     report_items.append(AttendanceReportItem(
-            #         date=current_date,
-            #         employee_name=user.name,
-            #         employee_email=user.email,
-            #         attendance_status="HOLIDAY",
-            #         is_holiday=True,
-            #         holiday_name=holiday_label,
-            #     ))
-        else:
-            # Working day — determine per-employee status
-            for user in users:
-                uid = str(user.id)
-                entry_key = (uid, current_date)
+        for user in users:
 
-                # For supervisors, skip status checking and always show PRESENT
-                pd = prod_map.get(entry_key)
-                if user.role == 'SUPERVISOR':
+            uid = str(user.id)
+            entry_key = (uid, current_date)
+
+            pd = prod_map.get(entry_key)
+            leave_hours = leave_hours_map.get(entry_key, 0)
+
+            is_full_day_leave = False
+            is_half_day_leave = False
+            is_short_leave = False
+
+            if user.role == "SUPERVISOR":
+                attendance_status = "PRESENT"
+                production = round(pd["production"], 2) if pd else 0.0
+                client_names_str = ", ".join(pd["clients"]) if pd and pd["clients"] else None
+
+            elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
+
+                has_production = pd and pd["production"] > 0
+
+                # Categorize Leave
+                if leave_hours >= 8 or leave_hours > 4:
+                    is_full_day_leave = True
+                elif leave_hours > 2:
+                    is_half_day_leave = True
+                elif leave_hours > 0:
+                    is_short_leave = True
+
+                if has_production:
                     attendance_status = "PRESENT"
-                    production = round(pd['production'], 2) if pd else 0.0
-                    client_names_str = ", ".join(pd['clients']) if pd and pd['clients'] else None
-                elif entry_key in entry_map:
-                    es = entry_map[entry_key]
-                    if es == TaskEntryStatus.APPROVED:
-                        if pd and pd['production'] > 0:
-                            attendance_status = "PRESENT"
-                            production = round(pd['production'], 2)
-                            client_names_str = ", ".join(pd['clients']) if pd['clients'] else None
-                        elif entry_key in leave_entry_set:
-                            attendance_status = "LEAVE"
-                            production = None
-                            client_names_str = None
-                        else:
-                            attendance_status = "ABSENT"
-                            production = None
-                            client_names_str = None
-                    else:
-                        attendance_status = "ABSENT"
-                        production = None
-                        client_names_str = None
+                    production = round(pd["production"], 2)
+                    client_names_str = ", ".join(pd["clients"]) if pd["clients"] else None
+                elif leave_hours > 0:
+                    attendance_status = "LEAVE"
+                    production = None
+                    client_names_str = None
                 else:
                     attendance_status = "ABSENT"
                     production = None
                     client_names_str = None
+            else:
+                attendance_status = "ABSENT"
+                production = None
+                client_names_str = None
 
-                report_items.append(AttendanceReportItem(
-                    date=current_date,
-                    employee_name=user.name,
-                    employee_email=user.email,
-                    attendance_status=attendance_status,
-                    is_holiday=False,
-                    production=production,
-                    client_names=client_names_str,
-                ))
+            report_items.append(AttendanceReportItem(
+                date=current_date,
+                employee_name=user.name,
+                employee_email=user.email,
+                attendance_status=attendance_status,
+                is_holiday=False,
+                production=production,
+                client_names=client_names_str,
+                is_full_day_leave=is_full_day_leave,
+                is_half_day_leave=is_half_day_leave,
+                is_short_leave=is_short_leave,
+                leave_hours=leave_hours if leave_hours > 0 else None
+            ))
 
         current_date += timedelta(days=1)
 
     return report_items
-
 
 @router.get("/leave", response_model=List[LeaveReportItem])
 def get_leave_report(
@@ -368,7 +383,6 @@ async def export_attendance_to_excel(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Export attendance report (with holiday awareness and production) to Excel (admin only)."""
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -378,95 +392,132 @@ async def export_attendance_to_excel(
             detail="openpyxl library is not installed"
         )
 
-    # Resolve dates
     if date_range and date_range != "custom":
         from_date, to_date = get_date_range(date_range)
     elif not from_date or not to_date:
         from_date, to_date = get_date_range("current_week")
 
-    # Reuse the same report-building logic by calling the endpoint function directly
-    # Build report data inline (same logic as get_attendance_report)
+    # ───────── Users ─────────
     user_query = db.query(User).filter(
-        User.is_active == True, 
-        User.role.in_(['EMPLOYEE', 'SUPERVISOR'])
+        User.is_active == True,
+        User.role.in_(["EMPLOYEE", "SUPERVISOR"])
     )
+
     if user_ids:
-        uid_list = [u.strip() for u in user_ids.split(',') if u.strip()]
+        uid_list = [u.strip() for u in user_ids.split(",") if u.strip()]
         if uid_list:
             user_query = user_query.filter(User.id.in_(uid_list))
+
     users = user_query.order_by(User.name).all()
     user_id_strs = [str(u.id) for u in users]
 
+    # ───────── Holidays / Saturdays ─────────
     holiday_map = {
         row.holiday_date: row.name
         for row in db.query(Holiday.holiday_date, Holiday.name).filter(
-            Holiday.holiday_date >= from_date, Holiday.holiday_date <= to_date
+            Holiday.holiday_date >= from_date,
+            Holiday.holiday_date <= to_date
         ).all()
     }
+
     working_saturday_set = {
         row.work_date
         for row in db.query(WorkingSaturday.work_date).filter(
-            WorkingSaturday.work_date >= from_date, WorkingSaturday.work_date <= to_date
+            WorkingSaturday.work_date >= from_date,
+            WorkingSaturday.work_date <= to_date
         ).all()
-    }
-    _leave_keywords = ['leave', 'sick', 'vacation', 'absent', 'off day', 'time off']
-    _leave_tm_ids = {
-        row.id for row in db.query(TaskMaster.id).filter(
-            or_(*(func.lower(TaskMaster.name).contains(kw) for kw in _leave_keywords))
-        ).all()
-    }
-    leave_entry_set: set = {
-        (str(row.user_id), row.work_date)
-        for row in db.query(TaskEntry.user_id, TaskEntry.work_date).join(
-            TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
-        ).filter(
-            TaskEntry.work_date >= from_date,
-            TaskEntry.work_date <= to_date,
-            TaskEntry.status == TaskEntryStatus.APPROVED,
-            TaskEntry.user_id.in_(user_id_strs),
-            TaskSubEntry.task_master_id.in_(_leave_tm_ids),
-        ).distinct().all()
     }
 
-    STATUS_PRIORITY = {
-        TaskEntryStatus.APPROVED: 4, TaskEntryStatus.PENDING: 3,
-        TaskEntryStatus.DRAFT: 2, TaskEntryStatus.REJECTED: 1,
+    # ───────── Leave Task Master ─────────
+    leave_tm_ids = {
+        row.id for row in db.query(TaskMaster.id).filter(
+            func.lower(TaskMaster.name) == "leave"
+        ).all()
     }
-    entry_map: dict = {}
+
+    from collections import defaultdict
+
+    # ───────── Leave Hours Map ─────────
+    leave_hours_map = defaultdict(float)
+
+    leave_q = db.query(
+        TaskEntry.user_id,
+        TaskEntry.work_date,
+        func.sum(TaskSubEntry.hours).label("total_leave_hours")
+    ).join(
+        TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+    ).filter(
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        TaskEntry.user_id.in_(user_id_strs),
+        TaskSubEntry.task_master_id.in_(leave_tm_ids),
+    ).group_by(
+        TaskEntry.user_id,
+        TaskEntry.work_date
+    )
+
+    for row in leave_q.all():
+        leave_hours_map[(str(row.user_id), row.work_date)] = float(row.total_leave_hours or 0)
+
+    # ───────── Entry Map ─────────
+    STATUS_PRIORITY = {
+        TaskEntryStatus.APPROVED: 4,
+        TaskEntryStatus.PENDING: 3,
+        TaskEntryStatus.DRAFT: 2,
+        TaskEntryStatus.REJECTED: 1,
+    }
+
+    entry_map = {}
+
     for er in db.query(TaskEntry.user_id, TaskEntry.work_date, TaskEntry.status).filter(
-        TaskEntry.work_date >= from_date, TaskEntry.work_date <= to_date,
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
         TaskEntry.user_id.in_(user_id_strs)
     ).all():
+
         key = (str(er.user_id), er.work_date)
         if key not in entry_map or STATUS_PRIORITY.get(er.status, 0) > STATUS_PRIORITY.get(entry_map[key], 0):
             entry_map[key] = er.status
 
-    from collections import defaultdict
-    prod_map: dict = defaultdict(lambda: {'production': 0.0, 'clients': []})
+    # ───────── Production Map ─────────
+    prod_map = defaultdict(lambda: {"production": 0.0, "clients": []})
+
     prod_q = db.query(
-        TaskEntry.user_id, TaskEntry.work_date,
-        func.coalesce(Client.name, 'No Client').label('client_name'),
-        func.sum(TaskSubEntry.production).label('total_production'),
-    ).join(TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
-    ).outerjoin(Client, TaskSubEntry.client_id == Client.id
+        TaskEntry.user_id,
+        TaskEntry.work_date,
+        func.coalesce(Client.name, "No Client").label("client_name"),
+        func.sum(TaskSubEntry.production).label("total_production"),
+    ).join(
+        TaskSubEntry, TaskEntry.id == TaskSubEntry.task_entry_id
+    ).outerjoin(
+        Client, TaskSubEntry.client_id == Client.id
     ).filter(
-        TaskEntry.work_date >= from_date, TaskEntry.work_date <= to_date,
-        TaskEntry.status == TaskEntryStatus.APPROVED, TaskEntry.user_id.in_(user_id_strs),
+        TaskEntry.work_date >= from_date,
+        TaskEntry.work_date <= to_date,
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        TaskEntry.user_id.in_(user_id_strs),
     )
+
     if is_profitable is not None:
-        prod_q = prod_q.join(TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
+        prod_q = prod_q.join(
+            TaskMaster, TaskSubEntry.task_master_id == TaskMaster.id
         ).filter(TaskMaster.is_profitable == is_profitable)
+
     prod_q = prod_q.group_by(TaskEntry.user_id, TaskEntry.work_date, Client.name)
+
     for pr in prod_q.all():
         key = (str(pr.user_id), pr.work_date)
-        prod_map[key]['production'] += float(pr.total_production or 0)
-        if pr.client_name and pr.client_name not in prod_map[key]['clients']:
-            prod_map[key]['clients'].append(pr.client_name)
+        prod_map[key]["production"] += float(pr.total_production or 0)
+        if pr.client_name and pr.client_name not in prod_map[key]["clients"]:
+            prod_map[key]["clients"].append(pr.client_name)
 
-    # Build rows
+    # ───────── Build Rows ─────────
     rows = []
     current_date = from_date
+
     while current_date <= to_date:
+
         weekday = current_date.weekday()
         is_sunday = weekday == 6
         is_saturday = weekday == 5
@@ -474,124 +525,104 @@ async def export_attendance_to_excel(
         in_holiday_map = current_date in holiday_map
 
         if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
-            holiday_label = holiday_map.get(current_date) or ("Sunday" if is_sunday else "Saturday")
-            # for user in users:
-            #     rows.append({
-            #         'date': str(current_date), 'employee': user.name,
-            #         'status': 'HOLIDAY', 'holiday_name': holiday_label,
-            #         'production': None, 'clients': None,
-            #     })
-        else:
-            for user in users:
-                uid = str(user.id)
-                entry_key = (uid, current_date)
-                
-                # For supervisors, skip status checking and always show PRESENT
-                if user.role == 'SUPERVISOR':
-                    pd = prod_map.get(entry_key)
-                    rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
-                                 'holiday_name': None,
-                                 'production': round(pd['production'], 2) if pd else 0.0,
-                                 'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
-                elif entry_key in entry_map:
-                    es = entry_map[entry_key]
-                    if es == TaskEntryStatus.APPROVED:
-                        pd = prod_map.get(entry_key)
+            current_date += timedelta(days=1)
+            continue
 
-                        if pd and pd['production'] > 0:
-                            rows.append({'date': str(current_date), 'employee': user.name, 'status': 'PRESENT',
-                                         'holiday_name': None,
-                                         'production': round(pd['production'], 2) if pd else 0.0,
-                                         'clients': ", ".join(pd['clients']) if pd and pd['clients'] else None})
-                        elif entry_key in leave_entry_set:
-                            rows.append({'date': str(current_date), 'employee': user.name,
-                                         'status': 'LEAVE', 'holiday_name': None, 'production': None, 'clients': None})
-                        else:
-                            rows.append({'date': str(current_date), 'employee': user.name,
-                                         'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
-                    elif es in (TaskEntryStatus.PENDING, TaskEntryStatus.DRAFT):
-                        rows.append({'date': str(current_date), 'employee': user.name,
-                                     'status': 'PENDING', 'holiday_name': None, 'production': None, 'clients': None})
-                    else:
-                        rows.append({'date': str(current_date), 'employee': user.name,
-                                     'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
+        for user in users:
+
+            uid = str(user.id)
+            entry_key = (uid, current_date)
+
+            pd = prod_map.get(entry_key)
+            leave_hours = leave_hours_map.get(entry_key, 0)
+
+            status = "ABSENT"
+            production = None
+            clients = None
+
+            if user.role == "SUPERVISOR":
+                status = "PRESENT"
+                production = round(pd["production"], 2) if pd else 0.0
+                clients = ", ".join(pd["clients"]) if pd and pd["clients"] else None
+
+            elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
+
+                has_production = pd and pd["production"] > 0
+
+                leave_label = None
+                if leave_hours >= 8 or leave_hours > 4:
+                    leave_label = "FULL DAY LEAVE"
+                elif leave_hours > 2:
+                    leave_label = "HALF DAY LEAVE"
+                elif leave_hours > 0:
+                    leave_label = "SHORT LEAVE"
+
+                if has_production:
+                    status = "PRESENT"
+                    production = round(pd["production"], 2)
+                    clients = ", ".join(pd["clients"]) if pd["clients"] else None
+                    if leave_label:
+                        status = leave_label
+                elif leave_label:
+                    status = leave_label
                 else:
-                    rows.append({'date': str(current_date), 'employee': user.name,
-                                 'status': 'ABSENT', 'holiday_name': None, 'production': None, 'clients': None})
+                    status = "ABSENT"
+
+            rows.append({
+                "date": str(current_date),
+                "employee": user.name,
+                "status": status,
+                "production": production,
+                "clients": clients
+            })
+
         current_date += timedelta(days=1)
 
-    # ── Excel workbook ────────────────────────────────────────────────────
+    # ───────── Excel Generation ─────────
     wb = Workbook()
     ws = wb.active
     ws.title = "Attendance Report"
 
-    title_fill  = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-    title_font  = Font(color="FFFFFF", bold=True, size=14)
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
-    center      = Alignment(horizontal="center", vertical="center")
-    border      = Border(left=Side(style='thin'), right=Side(style='thin'),
-                         top=Side(style='thin'),  bottom=Side(style='thin'))
+    border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                    top=Side(style='thin'), bottom=Side(style='thin'))
 
-    STATUS_FILL = {
-        'PRESENT': PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
-        'ABSENT':  PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
-        'LEAVE':   PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
-        'PENDING': PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"),
-        'HOLIDAY': PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid"),
-    }
+    headers = ["Date", "Employee", "Status", "Production", "Client(s)"]
 
-    NUM_COLS = 5
-    row_num = 1
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
 
-    ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
-    tc = ws.cell(row=row_num, column=1, value=f"Attendance Report: {from_date} to {to_date}")
-    tc.fill, tc.font, tc.alignment = title_fill, title_font, center
-    row_num += 2
+    row_num = 2
+    for r in rows:
+        values = [r["date"], r["employee"], r["status"],
+                  r["production"] if r["production"] else "",
+                  r["clients"] or ""]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row_num, column=col, value=val)
+            cell.border = border
+        row_num += 1
 
-    for col, header in enumerate(["Date", "Employee", "Status", "Production", "Client(s)"], 1):
-        cell = ws.cell(row=row_num, column=col, value=header)
-        cell.fill, cell.font, cell.alignment, cell.border = header_fill, header_font, center, border
-    row_num += 1
-
-    if not rows:
-        ws.merge_cells(start_row=row_num, start_column=1, end_row=row_num, end_column=NUM_COLS)
-        nd = ws.cell(row=row_num, column=1, value="No data found for the selected filters")
-        nd.alignment, nd.font = center, Font(italic=True, size=12)
-    else:
-        for r in rows:
-            row_fill = STATUS_FILL.get(r['status'])
-            status_display = r['status']
-            if r['status'] == 'HOLIDAY' and r.get('holiday_name'):
-                status_display = f"HOLIDAY – {r['holiday_name']}"
-
-            values = [r['date'], r['employee'], status_display,
-                      r['production'] if r['production'] is not None else '',
-                      r['clients'] or '']
-            for col, val in enumerate(values, 1):
-                cell = ws.cell(row=row_num, column=col, value=val)
-                cell.border = border
-                if row_fill:
-                    cell.fill = row_fill
-            row_num += 1
-
-    ws.column_dimensions['A'].width = 14
-    ws.column_dimensions['B'].width = 22
-    ws.column_dimensions['C'].width = 24
-    ws.column_dimensions['D'].width = 14
-    ws.column_dimensions['E'].width = 28
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 28
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 28
 
     excel_file = BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
 
     filename = f"attendance_report_{from_date}_{to_date}.xlsx"
+
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
-
 
 @router.get("/export/excel")
 async def export_to_excel(

@@ -332,11 +332,12 @@ class AttendanceReportItem(BaseModel):
     date: date
     employee_name: str
     employee_email: str
-    attendance_status: str  # PRESENT, ABSENT, LEAVE, PENDING, HOLIDAY
-    is_holiday: bool = False
-    holiday_name: Optional[str] = None
+    attendance_status: str
+    is_holiday: bool
     production: Optional[float] = None
-    client_names: Optional[str] = None  # comma-separated client names
+    client_names: Optional[str] = None
+    is_short_leave: bool = False
+    is_half_day_leave: bool = False
 
 
 class LeaveReportItem(BaseModel):
