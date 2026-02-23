@@ -495,7 +495,7 @@ def get_production_breakdown(
     if user_id:
         query = query.filter(TaskEntry.user_id == user_id)
     
-    query = query.group_by(Client.name).order_by(
+    query = query.group_by(Client.id).order_by(
         func.sum(TaskSubEntry.production).desc()
     )
     
@@ -585,31 +585,39 @@ def get_admin_stats(
     
     # Total hours
     total_hours_query = db.query(func.sum(TaskEntry.total_hours)).filter(
-        TaskEntry.work_date >= from_date,
-        TaskEntry.work_date <= to_date,
         TaskEntry.status == TaskEntryStatus.APPROVED
     ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
-    
+
+    if use_date_filter:
+        total_hours_query = total_hours_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+
     if client_id:
         total_hours_query = total_hours_query.filter(TaskEntry.client_id == client_id)
     if user_id:
         total_hours_query = total_hours_query.filter(TaskEntry.user_id == user_id)
-    
+
     total_hours = total_hours_query.scalar() or Decimal(0)
     
     # Total overtime hours
     total_overtime_query = db.query(func.sum(TaskEntry.overtime_hours)).filter(
-        TaskEntry.work_date >= from_date,
-        TaskEntry.work_date <= to_date,
         TaskEntry.is_overtime == True,
         TaskEntry.status == TaskEntryStatus.APPROVED
     ).join(User, TaskEntry.user_id == User.id).filter(User.role == UserRole.EMPLOYEE)
-    
+
+    if use_date_filter:
+        total_overtime_query = total_overtime_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+
     if client_id:
         total_overtime_query = total_overtime_query.filter(TaskEntry.client_id == client_id)
     if user_id:
         total_overtime_query = total_overtime_query.filter(TaskEntry.user_id == user_id)
-    
+
     total_overtime = total_overtime_query.scalar() or Decimal(0)
     
     # Client counts by status (NOT filtered by date/client/user - these are static master data)
@@ -647,17 +655,21 @@ def get_admin_stats(
     ).join(
         User, TaskEntry.user_id == User.id
     ).filter(
-        TaskEntry.work_date >= from_date,
-        TaskEntry.work_date <= to_date,
         User.role == UserRole.EMPLOYEE
     )
-    
+
+    if use_date_filter:
+        client_query = client_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+
     if client_id:
         client_query = client_query.filter(TaskEntry.client_id == client_id)
     if user_id:
         client_query = client_query.filter(TaskEntry.user_id == user_id)
-    
-    client_query = client_query.group_by(Client.name).order_by(func.count(TaskEntry.id).desc()).limit(5)
+
+    client_query = client_query.group_by(Client.id).order_by(func.count(TaskEntry.id).desc()).limit(5)
     client_results = client_query.all()
     
     client_breakdown = [
@@ -676,11 +688,15 @@ def get_admin_stats(
     ).join(
         User, TaskEntry.user_id == User.id
     ).filter(
-        TaskEntry.work_date >= from_date,
-        TaskEntry.work_date <= to_date,
         User.role == UserRole.EMPLOYEE
     )
-    
+
+    if use_date_filter:
+        profitable_query = profitable_query.filter(
+            TaskEntry.work_date >= from_date,
+            TaskEntry.work_date <= to_date
+        )
+
     if client_id:
         profitable_query = profitable_query.filter(TaskEntry.client_id == client_id)
     if user_id:
