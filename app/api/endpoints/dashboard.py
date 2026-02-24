@@ -44,6 +44,7 @@ class AdminDashboardStats(BaseModel):
     approved_entries: int
     pending_entries: int
     rejected_entries: int
+    total_pending_approvals: int  # Total of all pending items: task entries + leave requests + deletions
     total_hours: Decimal
     total_overtime_hours: Decimal
     active_users_count: int
@@ -339,7 +340,14 @@ def get_filtered_stats(
     approved_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.APPROVED).count()
     pending_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.PENDING).count()
     rejected_entries = base_query.filter(TaskEntry.status == TaskEntryStatus.REJECTED).count()
-    
+
+    # Pending leaves and deletions (for approval badge - not filtered by date for badge)
+    pending_leaves = db.query(func.count(LeaveRequest.id)).filter(LeaveRequest.status == LeaveStatus.PENDING).scalar() or 0
+    pending_deletions = db.query(func.count(TaskEntry.id)).filter(TaskEntry.status == TaskEntryStatus.PENDING_DELETION).scalar() or 0
+
+    # Total pending approvals = pending task entries + pending leaves + pending deletions
+    total_pending_approvals = pending_entries + pending_leaves + pending_deletions
+
     # Active users (users who have entries in filtered results)
     active_users_query = db.query(func.count(func.distinct(TaskEntry.user_id)))
     
@@ -797,6 +805,7 @@ def get_admin_stats(
         approved_entries=approved_entries,
         pending_entries=pending_entries,
         rejected_entries=rejected_entries,
+        total_pending_approvals=total_pending_approvals,
         total_hours=total_hours,
         total_overtime_hours=total_overtime,
         active_users_count=active_users,

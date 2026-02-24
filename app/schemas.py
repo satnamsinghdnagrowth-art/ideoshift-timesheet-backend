@@ -296,6 +296,16 @@ class RejectRequest(BaseModel):
     comment: str = Field(..., min_length=1)
 
 
+class BulkApprovalRequest(BaseModel):
+    ids: List[str] = Field(..., min_items=1)
+    comment: Optional[str] = None
+
+
+class BulkRejectRequest(BaseModel):
+    ids: List[str] = Field(..., min_items=1)
+    comment: str = Field(..., min_length=1)
+
+
 class DeletionRequestCreate(BaseModel):
     reason: Optional[str] = Field(None, max_length=500)
 

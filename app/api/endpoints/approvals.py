@@ -7,7 +7,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.task_entry import TaskEntry, TaskEntryStatus, TaskSubEntry
 from app.models.leave_request import LeaveRequest, LeaveStatus
-from app.schemas import TaskEntryResponse, LeaveRequestResponse, ApprovalRequest, RejectRequest
+from app.schemas import TaskEntryResponse, LeaveRequestResponse, ApprovalRequest, RejectRequest, BulkApprovalRequest, BulkRejectRequest
 from app.api.dependencies import require_admin
 
 router = APIRouter(prefix="/admin/approvals", tags=["Admin - Approvals"])
@@ -35,6 +35,145 @@ def list_pending_task_entries(
     
     task_entries = query.order_by(TaskEntry.work_date.desc()).offset(skip).limit(limit).all()
     return task_entries
+
+
+@router.post("/task-entries/bulk-approve")
+def bulk_approve_task_entries(
+    bulk_data: BulkApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk approve PENDING task entries (admin only)."""
+    processed = 0
+    failed = []
+
+    task_entries = db.query(TaskEntry).filter(TaskEntry.id.in_(bulk_data.ids)).all()
+    task_entries_by_id = {t.id: t for t in task_entries}
+
+    for entry_id in bulk_data.ids:
+        task_entry = task_entries_by_id.get(entry_id)
+
+        if not task_entry:
+            failed.append({"id": entry_id, "reason": "Task entry not found"})
+            continue
+
+        if task_entry.status != TaskEntryStatus.PENDING:
+            failed.append({"id": entry_id, "reason": f"Only PENDING entries can be approved, current status: {task_entry.status}"})
+            continue
+
+        task_entry.status = TaskEntryStatus.APPROVED
+        task_entry.admin_comment = bulk_data.comment
+        task_entry.approved_by = current_user.id
+        task_entry.approved_at = datetime.utcnow()
+        task_entry.updated_by = current_user.id
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
+
+
+@router.post("/task-entries/bulk-reject")
+def bulk_reject_task_entries(
+    bulk_data: BulkRejectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk reject PENDING task entries (admin only)."""
+    processed = 0
+    failed = []
+
+    task_entries = db.query(TaskEntry).filter(TaskEntry.id.in_(bulk_data.ids)).all()
+    task_entries_by_id = {t.id: t for t in task_entries}
+
+    for entry_id in bulk_data.ids:
+        task_entry = task_entries_by_id.get(entry_id)
+
+        if not task_entry:
+            failed.append({"id": entry_id, "reason": "Task entry not found"})
+            continue
+
+        if task_entry.status != TaskEntryStatus.PENDING:
+            failed.append({"id": entry_id, "reason": f"Only PENDING entries can be rejected, current status: {task_entry.status}"})
+            continue
+
+        task_entry.status = TaskEntryStatus.REJECTED
+        task_entry.admin_comment = bulk_data.comment
+        task_entry.approved_by = current_user.id
+        task_entry.approved_at = datetime.utcnow()
+        task_entry.updated_by = current_user.id
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
+
+
+@router.post("/task-entries/bulk-approve-deletion")
+def bulk_approve_task_entry_deletion(
+    bulk_data: BulkApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk approve deletion requests and hard-delete task entries (admin only)."""
+    processed = 0
+    failed = []
+
+    task_entries = db.query(TaskEntry).filter(TaskEntry.id.in_(bulk_data.ids)).all()
+    task_entries_by_id = {t.id: t for t in task_entries}
+
+    for entry_id in bulk_data.ids:
+        task_entry = task_entries_by_id.get(entry_id)
+
+        if not task_entry:
+            failed.append({"id": entry_id, "reason": "Task entry not found"})
+            continue
+
+        if task_entry.status != TaskEntryStatus.PENDING_DELETION:
+            failed.append({"id": entry_id, "reason": f"Only PENDING_DELETION entries can be approved, current status: {task_entry.status}"})
+            continue
+
+        db.delete(task_entry)
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
+
+
+@router.post("/task-entries/bulk-reject-deletion")
+def bulk_reject_task_entry_deletion(
+    bulk_data: BulkRejectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk reject deletion requests and restore task entries (admin only)."""
+    processed = 0
+    failed = []
+
+    task_entries = db.query(TaskEntry).filter(TaskEntry.id.in_(bulk_data.ids)).all()
+    task_entries_by_id = {t.id: t for t in task_entries}
+
+    for entry_id in bulk_data.ids:
+        task_entry = task_entries_by_id.get(entry_id)
+
+        if not task_entry:
+            failed.append({"id": entry_id, "reason": "Task entry not found"})
+            continue
+
+        if task_entry.status != TaskEntryStatus.PENDING_DELETION:
+            failed.append({"id": entry_id, "reason": f"Only PENDING_DELETION entries can be rejected, current status: {task_entry.status}"})
+            continue
+
+        task_entry.status = task_entry.pre_deletion_status or TaskEntryStatus.APPROVED
+        task_entry.admin_comment = bulk_data.comment
+        task_entry.approved_by = current_user.id
+        task_entry.approved_at = datetime.utcnow()
+        task_entry.updated_by = current_user.id
+        task_entry.deletion_reason = None
+        task_entry.deletion_requested_at = None
+        task_entry.pre_deletion_status = None
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
 
 
 @router.post("/task-entries/{task_entry_id}/approve", response_model=TaskEntryResponse)
@@ -188,6 +327,76 @@ def list_pending_leaves(
     
     leave_requests = query.order_by(LeaveRequest.from_date.desc()).offset(skip).limit(limit).all()
     return leave_requests
+
+
+@router.post("/leaves/bulk-approve")
+def bulk_approve_leaves(
+    bulk_data: BulkApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk approve PENDING leave requests (admin only)."""
+    processed = 0
+    failed = []
+
+    leave_requests = db.query(LeaveRequest).filter(LeaveRequest.id.in_(bulk_data.ids)).all()
+    leave_requests_by_id = {l.id: l for l in leave_requests}
+
+    for request_id in bulk_data.ids:
+        leave_request = leave_requests_by_id.get(request_id)
+
+        if not leave_request:
+            failed.append({"id": request_id, "reason": "Leave request not found"})
+            continue
+
+        if leave_request.status != LeaveStatus.PENDING:
+            failed.append({"id": request_id, "reason": f"Only PENDING leave requests can be approved, current status: {leave_request.status}"})
+            continue
+
+        leave_request.status = LeaveStatus.APPROVED
+        leave_request.admin_comment = bulk_data.comment
+        leave_request.approved_by = current_user.id
+        leave_request.approved_at = datetime.utcnow()
+        leave_request.updated_by = current_user.id
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
+
+
+@router.post("/leaves/bulk-reject")
+def bulk_reject_leaves(
+    bulk_data: BulkRejectRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Bulk reject PENDING leave requests (admin only)."""
+    processed = 0
+    failed = []
+
+    leave_requests = db.query(LeaveRequest).filter(LeaveRequest.id.in_(bulk_data.ids)).all()
+    leave_requests_by_id = {l.id: l for l in leave_requests}
+
+    for request_id in bulk_data.ids:
+        leave_request = leave_requests_by_id.get(request_id)
+
+        if not leave_request:
+            failed.append({"id": request_id, "reason": "Leave request not found"})
+            continue
+
+        if leave_request.status != LeaveStatus.PENDING:
+            failed.append({"id": request_id, "reason": f"Only PENDING leave requests can be rejected, current status: {leave_request.status}"})
+            continue
+
+        leave_request.status = LeaveStatus.REJECTED
+        leave_request.admin_comment = bulk_data.comment
+        leave_request.approved_by = current_user.id
+        leave_request.approved_at = datetime.utcnow()
+        leave_request.updated_by = current_user.id
+        processed += 1
+
+    db.commit()
+    return {"processed": processed, "failed": failed}
 
 
 @router.post("/leaves/{leave_request_id}/approve", response_model=LeaveRequestResponse)
