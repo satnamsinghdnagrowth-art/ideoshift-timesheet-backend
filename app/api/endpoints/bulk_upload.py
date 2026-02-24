@@ -19,64 +19,39 @@ router = APIRouter(prefix="/bulk", tags=["Bulk Upload"])
 
 
 def is_holiday(work_date: date, db: Session) -> bool:
-    """Check if the given date is a defined holiday."""
     holiday = db.query(Holiday).filter(Holiday.holiday_date == work_date).first()
     return holiday is not None
 
 
 def is_working_saturday(work_date: date, db: Session) -> bool:
-    """Check if the given date is a defined working Saturday."""
     ws = db.query(WorkingSaturday).filter(WorkingSaturday.work_date == work_date).first()
     return ws is not None
 
 
 def is_weekend(work_date: date) -> bool:
-    """Check if the given date is a weekend (Saturday or Sunday)."""
-    return work_date.weekday() in [5, 6]  # 5 = Saturday, 6 = Sunday
+    return work_date.weekday() in [5, 6]
 
 
 def calculate_task_status(work_date: date, total_hours: Decimal, db: Session) -> Tuple[TaskEntryStatus, bool, Decimal]:
-    """
-    Calculate task entry status based on date and hours.
 
-    Returns: (status, is_overtime, overtime_hours)
-
-    Approval rules (priority order):
-    1. Non-working day (holiday, Sunday, or Saturday not designated as working day):
-       - ALWAYS PENDING regardless of hours — admin approval required
-       - All hours count as overtime
-    2. Working day with exactly 8 hours: APPROVED (auto-approved)
-    3. Working day with > 8 hours: PENDING (overtime requires approval)
-    4. Working day with < 8 hours: PENDING (requires approval)
-
-    A working day is: Mon-Fri (not holiday), or designated working Saturday (not holiday)
-    A non-working day is: Holiday, Sunday, or Saturday (non-designated)
-    """
-    weekday = work_date.weekday()
-    is_sat = weekday == 5
-    is_sun = weekday == 6
     is_hol = is_holiday(work_date, db)
-    is_work_sat = is_sat and is_working_saturday(work_date, db)
+    is_weekend_day = is_weekend(work_date)
+    is_work_sat = work_date.weekday() == 5 and is_working_saturday(work_date, db)
 
-    # Determine if this is a non-working day (HIGHEST PRIORITY CHECK)
-    # Non-working: Holiday, Sunday, or Saturday without working Saturday designation
-    is_non_working_day = is_hol or is_sun or (is_sat and not is_work_sat)
+    is_non_working_day = (
+        is_hol
+        or (is_weekend_day and not is_work_sat)
+    )
 
-    # Priority 1: Non-working day — ALWAYS requires admin approval, all hours are overtime
     if is_non_working_day:
         return TaskEntryStatus.PENDING, True, total_hours
 
-    # From here: working day (Mon-Fri non-holiday, or designated working Saturday)
-
-    # Priority 2: Exactly 8 hours on a working day — auto-approved
-    if total_hours == 8:
+    if total_hours == Decimal(8):
         return TaskEntryStatus.APPROVED, False, Decimal(0)
 
-    # Priority 3: More than 8 hours on a working day — overtime, requires approval
-    if total_hours > 8:
+    if total_hours > Decimal(8):
         return TaskEntryStatus.PENDING, True, total_hours - Decimal(8)
 
-    # Priority 4: Less than 8 hours on a working day — requires approval
     return TaskEntryStatus.PENDING, False, Decimal(0)
 
 
@@ -86,316 +61,232 @@ async def upload_task_entries(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """
-    Bulk upload task entries from Excel file.
-    
-    Expected Excel columns:
-    - Date: Entry date (YYYY-MM-DD format)
-    - Username: Login username or email prefix (used for user matching)
-    - Coder Name: Full name of the coder/user
-    - Client: Client name
-    - Task: Task name from task master
-    - Count: Production count (numeric)
-    - Time: Hours worked (numeric)
-    """
-    
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an Excel file (.xlsx or .xls)"
-        )
-    
+
+    import pandas as pd
+    from decimal import Decimal
+    from uuid import uuid4
+    from sqlalchemy.exc import IntegrityError
+
     try:
-        # Read Excel file
-        content = await file.read()
-        workbook = load_workbook(io.BytesIO(content))
-        worksheet = workbook.active
-        
-        # PHASE 1: VALIDATE ALL RECORDS FIRST
-        validation_results = []
-        task_entries_to_create = []
-        has_errors = False
-        
-        # Parse rows (skip header)
-        for row_idx, row in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
-            if not any(row):  # Skip empty rows
-                continue
-            
-            # Initialize result for this row
-            result = {
-                "success": False,
-                "message": "",
-                "coder_name": None,
-                "client_name": None,
-                "task_name": None,
-                "date": None
-            }
-            
+        df = pd.read_excel(file.file)
+
+        required_columns = ["Date", "Coder Name", "Client", "Task", "Count", "Time"]
+        for col in required_columns:
+            if col not in df.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing required column: {col}"
+                )
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Excel file is empty")
+
+        validation_errors = []
+        validated_rows = []
+        excel_duplicates = set()
+
+        def requires_hours_only(task_name: str) -> bool:
+            return any(keyword in task_name.lower() for keyword in [
+                "celebration", "leave", "meeting", "training", "technical"
+            ])
+
+        def requires_production_only(task_name: str) -> bool:
+            return "gp task" in task_name.lower()
+
+        # ---------------- VALIDATION ---------------- #
+
+        for index, row in df.iterrows():
+            row_number = index + 2
+
             try:
-                # Parse row data - expecting 7 columns: Date, Username, Coder Name, Client, Task, Count, Time
-                if len(row) < 7:
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"Row has only {len(row)} columns. Expected 7 columns: Date, Username, Coder Name, Client, Task, Count, Time",
-                        "coder_name": str(row[2]) if len(row) > 2 else None
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                date_val, username, coder_name, client_name, task_name, count_val, time_val = row[:7]
-                
-                # Validate required fields
-                if not all([date_val, username, coder_name, client_name, task_name, count_val, time_val]):
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": "Missing required fields (Date, Coder Name, Client, Task, Count, Time)",
-                        "coder_name": str(coder_name) if coder_name else None,
-                        "client_name": str(client_name) if client_name else None,
-                        "task_name": str(task_name) if task_name else None
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Convert and validate date
-                try:
-                    if isinstance(date_val, str):
-                        work_date = date.fromisoformat(date_val)
-                    else:
-                        work_date = date_val.date() if hasattr(date_val, 'date') else date_val
-                except (ValueError, AttributeError, TypeError):
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"Invalid date format: {date_val}. Expected YYYY-MM-DD.",
-                        "coder_name": str(coder_name),
-                        "client_name": str(client_name),
-                        "task_name": str(task_name)
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Convert and validate numeric values
-                try:
-                    # Handle empty or None values
-                    count_val_clean = str(count_val).strip() if count_val else "0"
-                    time_val_clean = str(time_val).strip() if time_val else "0"
-                    
-                    production = Decimal(count_val_clean)
-                    hours = Decimal(time_val_clean)
-                    
-                    if production < 0 or hours < 0:
-                        raise ValueError("Values must be positive")
-                except Exception as e:
-                    has_errors = True
-                    error_msg = "Invalid numeric values in Count or Time columns"
-                    result.update({
-                        "success": False,
-                        "message": f"{error_msg}: Count='{count_val}' (col 5), Time='{time_val}' (col 6). Expected: Count (numeric), Time (numeric).",
-                        "coder_name": str(coder_name),
-                        "client_name": str(client_name),
-                        "task_name": str(task_name),
-                        "date": work_date.isoformat() if 'work_date' in locals() else None
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Validate user exists - use Username first, then fallback to Coder Name
-                username_str = str(username).strip()
-                user = db.query(User).filter(
-                    User.email.ilike(f"{username_str}%"),
-                    User.is_active == True
-                ).first()
-                
-                # If not found by username, try by Coder Name (full name match)
+                work_date = pd.to_datetime(row["Date"]).date()
+                coder_name = str(row["Coder Name"]).strip()
+                client_name = str(row["Client"]).strip()
+                task_name = str(row["Task"]).strip()
+
+                production = Decimal(str(row["Count"])) if not pd.isna(row["Count"]) else Decimal("0")
+                hours = Decimal(str(row["Time"])) if not pd.isna(row["Time"]) else Decimal("0")
+
+                if not coder_name or not client_name or not task_name:
+                    raise ValueError("Required fields missing")
+
+                user = db.query(User).filter(User.name == coder_name).first()
                 if not user:
-                    coder_name_str = str(coder_name).strip()
-                    user = db.query(User).filter(
-                        User.name.ilike(f"%{coder_name_str}%"),
-                        User.is_active == True
-                    ).first()
-                
-                if not user:
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"User not found: '{username_str}' or '{coder_name_str}'",
-                        "coder_name": str(coder_name),
-                        "client_name": str(client_name),
-                        "task_name": str(task_name),
-                        "date": work_date.isoformat()
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Validate client exists
-                client_name_str = str(client_name).strip()
-                client = db.query(Client).filter(
-                    Client.name.ilike(f"%{client_name_str}%"),
-                    Client.is_active == True
-                ).first()
-                
+                    raise ValueError(f"User not found: {coder_name}")
+
+                client = db.query(Client).filter(Client.name == client_name).first()
                 if not client:
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"Client not found: '{client_name_str}'",
-                        "coder_name": coder_name_str,
-                        "client_name": client_name_str,
-                        "task_name": str(task_name),
-                        "date": work_date.isoformat()
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Validate task exists in task master
-                task_name_str = str(task_name).strip()
-                task_master = db.query(TaskMaster).filter(
-                    TaskMaster.name.ilike(f"%{task_name_str}%"),
-                    TaskMaster.is_active == True
-                ).first()
-                
+                    raise ValueError(f"Client not found: {client_name}")
+
+                task_master = db.query(TaskMaster).filter(TaskMaster.name == task_name).first()
                 if not task_master:
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"Task not found in task master: '{task_name_str}'",
-                        "coder_name": coder_name_str,
-                        "client_name": client_name_str,
-                        "task_name": task_name_str,
-                        "date": work_date.isoformat()
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # Check if entry already exists for this user on this date
-                existing_entry = db.query(TaskEntry).filter(
+                    raise ValueError(f"Task not found: {task_name}")
+
+                if requires_hours_only(task_name):
+                    if hours <= 0:
+                        raise ValueError("Hours must be greater than 0")
+                    if production > 0:
+                        raise ValueError("Production not allowed for this task")
+
+                elif requires_production_only(task_name):
+                    if production <= 0:
+                        raise ValueError("Production must be greater than 0")
+                    if hours > 0:
+                        raise ValueError("Hours not allowed for this task")
+
+                duplicate_key = (
+                    user.id,
+                    client.id,
+                    task_master.id,
+                    work_date,
+                    production
+                )
+
+                if duplicate_key in excel_duplicates:
+                    raise ValueError(
+                        f"Duplicate entry in Excel for {coder_name} "
+                        f"(Client: {client_name}, Task: {task_name}) "
+                        f"on {work_date} with production {production}"
+                    )
+
+                excel_duplicates.add(duplicate_key)
+
+                existing = db.query(TaskSubEntry).join(TaskEntry).filter(
                     TaskEntry.user_id == user.id,
-                    TaskEntry.work_date == work_date
+                    TaskEntry.work_date == work_date,
+                    TaskSubEntry.client_id == client.id,
+                    TaskSubEntry.task_master_id == task_master.id,
+                    TaskSubEntry.production == production
                 ).first()
-                
-                if existing_entry:
-                    has_errors = True
-                    result.update({
-                        "success": False,
-                        "message": f"Task entry already exists for {coder_name_str} on {work_date}",
-                        "coder_name": coder_name_str,
-                        "client_name": client_name_str,
-                        "task_name": task_name_str,
-                        "date": work_date.isoformat()
-                    })
-                    validation_results.append(result)
-                    continue
-                
-                # All validations passed - prepare for creation
-                status, is_overtime, overtime_hours = calculate_task_status(work_date, hours, db)
-                
-                task_entries_to_create.append({
+
+                if existing:
+                    raise ValueError(
+                        f"Duplicate record already exists in DB for "
+                        f"{coder_name} ({client_name}, {task_name}) "
+                        f"on {work_date} with production {production}"
+                    )
+
+                validated_rows.append({
                     "user": user,
                     "client": client,
                     "task_master": task_master,
                     "work_date": work_date,
                     "hours": hours,
-                    "production": production,
-                    "status": status,
-                    "is_overtime": is_overtime,
-                    "overtime_hours": overtime_hours,
-                    "coder_name": coder_name_str,
-                    "client_name": client_name_str,
-                    "task_name": task_name_str,
-                    "result": result
+                    "production": production
                 })
-                
-                result.update({
-                    "success": True,
-                    "message": f"Successfully created task entry",
-                    "coder_name": coder_name_str,
-                    "client_name": client_name_str,
-                    "task_name": task_name_str,
-                    "date": work_date.isoformat()
-                })
-                validation_results.append(result)
-                
+
             except Exception as e:
-                has_errors = True
-                result.update({
-                    "success": False,
-                    "message": f"Error processing row {row_idx}: {str(e)[:100]}",
-                    "coder_name": str(row[1]) if len(row) > 1 and row[1] else None
+                validation_errors.append({
+                    "row": row_number,
+                    "error": str(e)
                 })
-                validation_results.append(result)
-                continue
-        
-        # PHASE 2: IF ANY ERRORS, RETURN IMMEDIATELY WITHOUT SAVING
-        if has_errors:
+
+        if validation_errors:
             return {
-                "total_records": len(validation_results),
-                "successful": 0,
-                "failed": len(validation_results),
-                "results": validation_results,
-                "message": "❌ Validation failed. No records were saved. Please fix the errors and try again."
+                "total_rows": len(df),
+                "valid": len(df) - len(validation_errors),
+                "failed": len(validation_errors),
+                "errors": validation_errors
             }
-        
-        # PHASE 3: ALL VALIDATIONS PASSED - NOW SAVE TO DATABASE
-        try:
-            for entry_data in task_entries_to_create:
+
+        # ---------------- INSERT PHASE ---------------- #
+
+        task_entry_map = {}
+        task_entries_to_insert = []
+        sub_entries_to_insert = []
+
+        for row in validated_rows:
+            key = (row["user"].id, row["work_date"])
+
+            if key not in task_entry_map:
+
                 task_entry = TaskEntry(
-                    id=str(__import__('uuid').uuid4()),
-                    user_id=entry_data["user"].id,
-                    client_id=entry_data["client"].id,
-                    work_date=entry_data["work_date"],
-                    task_name=entry_data["task_master"].name,
-                    description=None,
-                    total_hours=entry_data["hours"],
-                    status=entry_data["status"],
-                    is_overtime=entry_data["is_overtime"],
-                    overtime_hours=entry_data["overtime_hours"],
+                    id=str(uuid4()),
+                    task_name=row["task_master"].name,
+                    user_id=row["user"].id,
+                    client_id=row["client"].id,
+                    work_date=row["work_date"],
+                    total_hours=Decimal("0"),
+                    status=TaskEntryStatus.PENDING,  # FIXED: use Enum
                     created_by=current_user.id,
                     updated_by=current_user.id
                 )
-                db.add(task_entry)
-                db.flush()
-                
-                # Create sub-entry
-                sub_entry = TaskSubEntry(
-                    id=str(__import__('uuid').uuid4()),
-                    task_entry_id=task_entry.id,
-                    client_id=entry_data["client"].id,
-                    task_master_id=entry_data["task_master"].id,
-                    title=entry_data["task_master"].name,
-                    description=None,
-                    hours=entry_data["hours"],
-                    productive=entry_data["task_master"].is_profitable,
-                    production=entry_data["production"]
-                )
-                db.add(sub_entry)
-            
-            # Commit all changes
+
+                task_entry._clients = set()
+                task_entry._subtask_count = 0
+
+                task_entry_map[key] = task_entry
+                task_entries_to_insert.append(task_entry)
+
+            parent = task_entry_map[key]
+
+            parent.total_hours += row["hours"]
+            parent._clients.add(row["client"].name)
+            parent._subtask_count += 1
+
+            sub_entry = TaskSubEntry(
+                id=str(uuid4()),
+                title=row["task_master"].name,
+                task_entry_id=parent.id,
+                client_id=row["client"].id,
+                task_master_id=row["task_master"].id,
+                hours=row["hours"],
+                production=row["production"],
+                productive=row["task_master"].is_profitable
+            )
+
+            sub_entries_to_insert.append(sub_entry)
+
+        # Finalize Parent Entries
+        for parent in task_entries_to_insert:
+
+            client_list = ", ".join(sorted(parent._clients))
+            task_word = "task" if parent._subtask_count == 1 else "tasks"
+            parent.description = f"{parent._subtask_count} {task_word} for {client_list}"
+
+            print(f"Parent Entry for {parent.work_date} - Total Hours: {parent.total_hours}, Clients: {client_list}")
+
+            # ✅ APPROVAL BASED ON TOTAL HOURS (NOT SUBTASK COUNT)
+            if parent.total_hours == Decimal("8"):
+                parent.status = TaskEntryStatus.APPROVED
+                parent.is_overtime = False
+                parent.overtime_hours = Decimal("0")
+
+            elif parent.total_hours > Decimal("8"):
+                parent.status = TaskEntryStatus.PENDING
+                parent.is_overtime = True
+                parent.overtime_hours = parent.total_hours - Decimal("8")
+
+            else:
+                parent.status = TaskEntryStatus.PENDING
+                parent.is_overtime = False
+                parent.overtime_hours = Decimal("0")
+
+            del parent._clients
+            del parent._subtask_count
+
+        # 🔥 FIXED: Use add_all instead of bulk_save_objects
+        try:
+            db.add_all(task_entries_to_insert)
+            db.flush()  # ensure parent IDs exist
+            db.add_all(sub_entries_to_insert)
             db.commit()
-            
-            return {
-                "total_records": len(task_entries_to_create),
-                "successful": len(task_entries_to_create),
-                "failed": 0,
-                "results": validation_results,
-                "message": f"✅ All {len(task_entries_to_create)} records saved successfully!"
-            }
-            
-        except Exception as e:
+
+        except IntegrityError:
             db.rollback()
-            # If save fails, return error
-            return {
-                "total_records": len(validation_results),
-                "successful": 0,
-                "failed": len(validation_results),
-                "results": validation_results,
-                "message": f"❌ Database save failed: {str(e)[:100]}. No records were saved."
-            }
-        
+            raise HTTPException(
+                status_code=400,
+                detail="Database constraint error during insert"
+            )
+
+        return {
+            "total_rows": len(df),
+            "inserted": len(validated_rows),
+            "message": "All records inserted successfully"
+        }
+
     except Exception as e:
-        db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=500,
             detail=f"Error processing file: {str(e)}"
         )

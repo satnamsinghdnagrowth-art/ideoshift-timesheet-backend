@@ -59,7 +59,7 @@ def get_timesheet_report(
     ).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
-        TaskEntry.status == TaskEntryStatus.APPROVED,
+        # TaskEntry.status == TaskEntryStatus.APPROVED,
         User.role == 'EMPLOYEE',
     )
 

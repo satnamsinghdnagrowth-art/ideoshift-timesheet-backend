@@ -97,24 +97,52 @@ def update_task_master(
     return task_master
 
 
-@router.delete("/{task_master_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task_master(
+@router.patch("/{task_master_id}", response_model=TaskMasterResponse)
+def update_task_master(
     task_master_id: str,
+    task_master_update: TaskMasterUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    """Soft delete a task master by setting is_active to False (admin only)."""
-    task_master = db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
-    
+    task_master = db.query(TaskMaster).filter(
+        TaskMaster.id == task_master_id
+    ).first()
+
     if not task_master:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task master not found"
         )
-    
-    # Soft delete: set is_active to False instead of deleting
-    task_master.is_active = False
+
+    # ---- Handle Name Update Safely ----
+    if task_master_update.name:
+        new_name = task_master_update.name.strip()
+
+        if new_name.lower() != task_master.name.strip().lower():
+
+            existing = db.query(TaskMaster).filter(
+                TaskMaster.name.ilike(new_name),
+                TaskMaster.id != task_master.id
+            ).first()
+
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Task master with this name already exists"
+                )
+
+            task_master.name = new_name
+
+    # ---- Update Other Fields ----
+    update_data = task_master_update.dict(exclude_unset=True)
+    update_data.pop("name", None)
+
+    for field, value in update_data.items():
+        setattr(task_master, field, value)
+
     task_master.updated_by = current_user.id
-    
+
     db.commit()
-    return None
+    db.refresh(task_master)
+
+    return task_master
