@@ -238,7 +238,6 @@ def get_attendance_report(
     # ── Build Report ─────────────────────────────────────────────
     report_items = []
     current_date = from_date
-
     while current_date <= to_date:
 
         weekday = current_date.weekday()
@@ -247,9 +246,8 @@ def get_attendance_report(
         is_working_saturday = current_date in working_saturday_set
         in_holiday_map = current_date in holiday_map
 
-        if is_sunday or in_holiday_map or (is_saturday and not is_working_saturday):
-            current_date += timedelta(days=1)
-            continue
+        # Check if current date is a non-working day (weekend/holiday)
+        is_non_working_day = is_sunday or in_holiday_map or (is_saturday and not is_working_saturday)
 
         for user in users:
 
@@ -262,15 +260,19 @@ def get_attendance_report(
             is_full_day_leave = False
             is_half_day_leave = False
             is_short_leave = False
+            has_production = pd and pd["production"] > 0
 
             if user.role == "SUPERVISOR":
+                has_production = pd and pd["production"] > 0
                 attendance_status = "PRESENT"
                 production = round(pd["production"], 2) if pd else 0.0
                 client_names_str = ", ".join(pd["clients"]) if pd and pd["clients"] else None
 
-            elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
+                # Mark SUPERVISOR as OVERTIME if working on non-working day (weekend/holiday)
+                if is_non_working_day:
+                    attendance_status = "OVERTIME"
 
-                has_production = pd and pd["production"] > 0
+            elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
 
                 # Categorize Leave
                 if leave_hours >= 8 or leave_hours > 4:
@@ -292,10 +294,19 @@ def get_attendance_report(
                     attendance_status = "ABSENT"
                     production = None
                     client_names_str = None
+
+                # Mark as OVERTIME if working on non-working day (weekend/holiday)
+                if is_non_working_day and has_production:
+                    attendance_status = "OVERTIME"
+
             else:
                 attendance_status = "ABSENT"
                 production = None
                 client_names_str = None
+
+            # Skip ABSENT records on non-working days (treat as holidays)
+            if is_non_working_day and attendance_status == "ABSENT":
+                continue
 
             report_items.append(AttendanceReportItem(
                 date=current_date,
