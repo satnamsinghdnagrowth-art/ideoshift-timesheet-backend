@@ -18,6 +18,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=6)
+    joining_date: Optional[datetime] = None
 
 
 class UserUpdate(BaseModel):
@@ -25,6 +26,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     role: Optional[UserRole] = None
     is_active: Optional[bool] = None
+    joining_date: Optional[datetime] = None
 
 
 class PasswordResetRequest(BaseModel):
@@ -39,6 +41,7 @@ class PasswordResetResponse(BaseModel):
 class UserResponse(UserBase):
     id: UUID
     is_active: bool
+    joining_date: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

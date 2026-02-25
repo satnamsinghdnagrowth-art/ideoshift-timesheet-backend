@@ -254,6 +254,10 @@ def get_attendance_report(
             uid = str(user.id)
             entry_key = (uid, current_date)
 
+            # Skip records before user's joining date
+            if user.joining_date and current_date < user.joining_date.date():
+                continue
+
             pd = prod_map.get(entry_key)
             leave_hours = leave_hours_map.get(entry_key, 0)
 
