@@ -366,8 +366,8 @@ def get_filtered_stats(
     approved_entries = approved_query.filter(TaskEntry.status == TaskEntryStatus.APPROVED).count()
 
     pending_query = build_filtered_query()
-    pending_entries = pending_query.filter(TaskEntry.status == TaskEntryStatus.PENDING)
-    pending_entries = pending_query.count()
+    pending_entries = pending_query.filter(TaskEntry.status == TaskEntryStatus.PENDING).count()
+
 
     rejected_query = build_filtered_query()
     rejected_entries = rejected_query.filter(TaskEntry.status == TaskEntryStatus.REJECTED).count()
