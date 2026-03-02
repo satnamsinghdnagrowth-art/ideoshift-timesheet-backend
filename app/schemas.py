@@ -203,6 +203,10 @@ class TaskEntryCreate(TaskEntryBase):
     # Removed client_id validation to allow leave tasks without clients
 
 
+class AdminTaskEntryCreate(TaskEntryCreate):
+    user_id: UUID  # Required: which employee to create the entry for
+
+
 class TaskEntryUpdate(BaseModel):
     task_name: Optional[str] = None
     description: Optional[str] = None

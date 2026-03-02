@@ -14,7 +14,7 @@ from app.models.client import Client
 from app.models.task_master import TaskMaster
 from app.models.working_saturday import WorkingSaturday
 from app.models.holiday import Holiday
-from app.schemas import TaskEntryCreate, TaskEntryUpdate, TaskEntryResponse, DeletionRequestCreate
+from app.schemas import TaskEntryCreate, TaskEntryUpdate, TaskEntryResponse, DeletionRequestCreate, AdminTaskEntryCreate
 from app.api.dependencies import get_current_user, require_admin
 
 router = APIRouter(prefix="/task-entries", tags=["Task Entries"])
@@ -792,9 +792,150 @@ def admin_update_task_entry(
             total_hours += float(sub_data.hours)
         
         task_entry.total_hours = total_hours
-    
+
     task_entry.updated_by = current_user.id
-    
+
+    db.commit()
+    db.refresh(task_entry)
+    return task_entry
+
+
+@router.post("/admin/create", response_model=TaskEntryResponse, status_code=status.HTTP_201_CREATED)
+def admin_create_task_entry_for_user(
+    task_entry_create: AdminTaskEntryCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Admin: Create a task entry on behalf of any employee."""
+
+    # Find the target user
+    target_user = db.query(User).filter(User.id == str(task_entry_create.user_id)).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    def get_task_master(task_master_id: str) -> Optional[TaskMaster]:
+        return db.query(TaskMaster).filter(TaskMaster.id == task_master_id).first()
+
+    def requires_hours_only(task_name: str) -> bool:
+        task_lower = task_name.lower()
+        return any(keyword in task_lower for keyword in [
+            'celebration', 'leave', 'meeting', 'tech', 'technical issue', 'training'
+        ])
+
+    def requires_production_only(task_name: str) -> bool:
+        return 'gp task' in task_name.lower()
+
+    def is_leave_task(task_master_id: str) -> bool:
+        task_master = get_task_master(task_master_id)
+        if not task_master:
+            return False
+        if hasattr(task_master, 'is_profitable') and task_master.is_profitable is False:
+            return True
+        return any(k in task_master.name.lower() for k in [
+            'leave', 'sick', 'vacation', 'absent', 'holiday', 'off day', 'time off'
+        ])
+
+    # Validate sub-entries
+    for sub in task_entry_create.sub_entries:
+        task_master = get_task_master(str(sub.task_master_id))
+        if not task_master:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Task master not found: {sub.task_master_id}"
+            )
+        task_name = task_master.name
+        if requires_hours_only(task_name):
+            if sub.hours <= 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Task '{task_name}' requires hours > 0")
+            if sub.production > 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Task '{task_name}' does not require a production value")
+        elif requires_production_only(task_name):
+            if sub.production <= 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Task '{task_name}' requires production > 0")
+            if sub.hours > 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Task '{task_name}' does not require hours")
+
+    # Validate non-leave clients
+    client_ids = {
+        sub.client_id for sub in task_entry_create.sub_entries
+        if sub.client_id is not None and not is_leave_task(str(sub.task_master_id))
+    }
+    if client_ids:
+        from app.models.client import ClientStatus
+        client_id_strs = {str(cid) for cid in client_ids}
+        all_clients = db.query(Client).filter(
+            Client.id.in_(client_id_strs), Client.is_active == True
+        ).all()
+        missing = client_id_strs - {c.id for c in all_clients}
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Clients not found or removed: {', '.join(missing)}")
+        inactive = [c.name for c in all_clients if c.status == ClientStatus.INACTIVE]
+        if inactive:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Cannot add entries for inactive clients: {', '.join(inactive)}")
+
+    # Check for duplicate entry on same date for the target user
+    existing = db.query(TaskEntry).filter(
+        TaskEntry.user_id == target_user.id,
+        TaskEntry.work_date == task_entry_create.work_date
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A task entry already exists for {target_user.name} on {task_entry_create.work_date}"
+        )
+
+    total_hours = sum(sub.hours for sub in task_entry_create.sub_entries)
+    entry_status, is_overtime, overtime_hours = calculate_task_status(
+        task_entry_create.work_date, total_hours, db
+    )
+
+    first_client_id = next(
+        (sub.client_id for sub in task_entry_create.sub_entries if sub.client_id is not None), None
+    )
+    task_entry = TaskEntry(
+        user_id=target_user.id,
+        client_id=str(task_entry_create.client_id) if task_entry_create.client_id else (
+            str(first_client_id) if first_client_id else None
+        ),
+        work_date=task_entry_create.work_date,
+        task_name=task_entry_create.task_name,
+        description=task_entry_create.description,
+        total_hours=total_hours,
+        status=entry_status,
+        is_overtime=is_overtime,
+        overtime_hours=overtime_hours,
+        created_by=current_user.id,
+        updated_by=current_user.id
+    )
+    db.add(task_entry)
+    db.flush()
+
+    for sub_data in task_entry_create.sub_entries:
+        task_master = db.query(TaskMaster).filter(TaskMaster.id == str(sub_data.task_master_id)).first()
+        if not task_master:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Task master not found: {sub_data.task_master_id}")
+        sub_entry = TaskSubEntry(
+            task_entry_id=task_entry.id,
+            client_id=str(sub_data.client_id) if sub_data.client_id else None,
+            title=sub_data.title,
+            description=sub_data.description,
+            hours=sub_data.hours,
+            productive=task_master.is_profitable,
+            production=sub_data.production,
+            task_master_id=str(sub_data.task_master_id)
+        )
+        db.add(sub_entry)
+
     db.commit()
     db.refresh(task_entry)
     return task_entry
