@@ -272,9 +272,11 @@ def get_attendance_report(
                 production = round(pd["production"], 2) if pd else 0.0
                 client_names_str = ", ".join(pd["clients"]) if pd and pd["clients"] else None
 
-                # Mark SUPERVISOR as OVERTIME if working on non-working day (weekend/holiday)
-                if is_non_working_day:
+                # Mark as OVERTIME if working on non-working day (weekend/holiday)
+                if is_non_working_day and has_production:
                     attendance_status = "OVERTIME"
+                elif is_non_working_day and not has_production:
+                    continue  # Skip non-working day records with no production for supervisors
 
             elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
 
