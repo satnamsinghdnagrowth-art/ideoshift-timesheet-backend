@@ -59,8 +59,8 @@ def get_timesheet_report(
     ).filter(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
-        # TaskEntry.status == TaskEntryStatus.APPROVED,
-        User.role == 'EMPLOYEE',
+        TaskEntry.status == TaskEntryStatus.APPROVED,
+        User.role.in_(["EMPLOYEE", "SUPERVISOR"])
     )
 
     # Multi-select filters
@@ -558,9 +558,16 @@ async def export_attendance_to_excel(
             clients = None
 
             if user.role == "SUPERVISOR":
-                status = "PRESENT"
+                has_production = pd and pd["production"] > 0
+                attendance_status = "PRESENT"
                 production = round(pd["production"], 2) if pd else 0.0
-                clients = ", ".join(pd["clients"]) if pd and pd["clients"] else None
+                client_names_str = ", ".join(pd["clients"]) if pd and pd["clients"] else None
+
+                # Mark as OVERTIME if working on non-working day (weekend/holiday)
+                if is_non_working_day and has_production:
+                    attendance_status = "OVERTIME"
+                elif is_non_working_day and not has_production:
+                    continue  # Skip non-working day records with no production for supervisors
 
             elif entry_key in entry_map and entry_map[entry_key] == TaskEntryStatus.APPROVED:
 
@@ -689,7 +696,7 @@ async def export_to_excel(
         TaskEntry.work_date >= from_date,
         TaskEntry.work_date <= to_date,
         TaskEntry.status == TaskEntryStatus.APPROVED,
-        User.role == 'EMPLOYEE',
+        User.role.in_(["EMPLOYEE", "SUPERVISOR"])
     )
 
     if client_ids:
